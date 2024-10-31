@@ -9,8 +9,6 @@ import logging
 from urllib.parse import urlparse, quote
 import datetime
 from datetime import datetime, timedelta
-import nltk
-from nltk.tokenize import sent_tokenize
 import json
 import io
 import csv
@@ -26,6 +24,7 @@ import statistics
 import traceback
 from werkzeug.exceptions import HTTPException
 import sys
+import pycountry
 
 # Near the top of app.py, after imports
 BASE_DIR = Path(os.getenv('RENDER_APP_DIR', os.getcwd()))
@@ -246,9 +245,9 @@ class DataCleaner:
     def clean_text(text: str) -> str:
         if not text:
             return ""
+        # Simple text cleaning without NLTK
         text = re.sub(r'\s+', ' ', text)
-        text = text.strip()
-        return text
+        return text.strip()
     
     @staticmethod
     def normalize_phone(phone: str, country_code: str) -> str:
