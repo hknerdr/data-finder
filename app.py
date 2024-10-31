@@ -13,7 +13,7 @@ import nltk
 import spacy
 
 # Configure logging
-logging.basicConfig(filename='scraper.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
 
 # Download necessary NLTK data
 nltk.download('punkt', quiet=True)
@@ -28,6 +28,7 @@ except OSError:
         from spacy.cli import download
         download('en_core_web_sm')
     nlp = spacy.load('en_core_web_sm')
+
 
 # Configure logging
 logging.basicConfig(filename='scraper.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
