@@ -29,6 +29,7 @@ import statistics
 import traceback
 from werkzeug.exceptions import HTTPException
 import sys
+import pycountry
 
 # NLTK Setup
 try:
@@ -130,6 +131,7 @@ class GlobalState:
         self.performance_optimizer = None
         self.error_tracker = None
         self.metrics_collector = None
+        self.search_engine = SearchEngine()
 
     def initialize(self):
         try:
@@ -449,6 +451,94 @@ class MetricsCollector:
         with self.lock:
             self.metrics.update(new_metrics)
 
+class SearchEngine:
+    def __init__(self):
+        self.session = requests.Session()
+        self.user_agent = UserAgent()
+    
+    def search(self, query: str, country_code: str) -> List[str]:
+        try:
+            headers = {
+                'User-Agent': self.user_agent.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+
+            # Example using DuckDuckGo (you can modify for other search engines)
+            params = {
+                'q': query,
+                'kl': f'region:{country_code}',
+                'format': 'json'
+            }
+            
+            response = self.session.get(
+                'https://api.duckduckgo.com/',
+                params=params,
+                headers=headers,
+                timeout=10
+            )
+            
+            # Process results (modify according to the search engine's response format)
+            if response.status_code == 200:
+                results = response.json()
+                return [result['url'] for result in results.get('Results', [])]
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}")
+            return []
+
+class RequestManager:
+    def __init__(self):
+        self.ua = UserAgent()
+        self.session = requests.Session()
+        self.request_count = 0
+    
+    def get_headers(self) -> Dict[str, str]:
+        self.request_count += 1
+        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
+            self.ua = UserAgent()
+        
+        return {
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+    
+    @retry(
+        stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    def make_request(self, url: str, method: str = 'get', **kwargs) -> Optional[requests.Response]:
+        try:
+            kwargs.update({
+                'headers': self.get_headers(),
+                'timeout': Config.REQUEST_TIMEOUT,
+                'verify': True,
+                'allow_redirects': True
+            })
+            
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            
+            # Add random delay between requests
+            time.sleep(random.uniform(1.0, 2.0))
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Request failed for {url}: {str(e)}")
+            return None
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
@@ -466,61 +556,177 @@ def handle_exception(e):
     
     return jsonify(error_details), 500
 
+# Add this after your imports
+import pycountry
+
+# Add this to your GlobalState class
+class GlobalState:
+    def __init__(self):
+        # Existing initialization code...
+        self.search_engine = SearchEngine()  # Add this line
+
+# Add these new classes
+class SearchEngine:
+    def __init__(self):
+        self.session = requests.Session()
+        self.user_agent = UserAgent()
+    
+    def search(self, query: str, country_code: str) -> List[str]:
+        try:
+            headers = {
+                'User-Agent': self.user_agent.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            
+            # Example using DuckDuckGo (you can modify for other search engines)
+            params = {
+                'q': query,
+                'kl': f'region:{country_code}',
+                'format': 'json'
+            }
+            
+            response = self.session.get(
+                'https://api.duckduckgo.com/',
+                params=params,
+                headers=headers,
+                timeout=10
+            )
+            
+            # Process results (modify according to the search engine's response format)
+            if response.status_code == 200:
+                results = response.json()
+                return [result['url'] for result in results.get('Results', [])]
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}")
+            return []
+
+# Update the home route
+@app.route('/')
+def home():
+    try:
+        # Get list of countries
+        countries = [(country.alpha_2, country.name) 
+                    for country in pycountry.countries]
+        countries.sort(key=lambda x: x[1])  # Sort by country name
+        
+        return render_template('index.html',
+                             countries=countries,
+                             industry_keywords=Keywords.INDUSTRY_KEYWORDS,
+                             business_keywords=Keywords.BUSINESS_KEYWORDS)
+    except Exception as e:
+        logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+# Update the scraping_worker function
 def scraping_worker(country: str, keywords: List[str] = None):
     """Worker function for scraping process"""
     try:
-        request_manager = RequestManager()
         queries = generate_search_queries(country, keywords)
         global_state.scraping_status['total'] = len(queries)
         
         global_state.monitoring_system.start_session()
+        logger.info(f"Starting scraping for country: {country} with {len(queries)} queries")
+        
+        request_manager = RequestManager()
         
         for idx, query in enumerate(queries, 1):
             if not global_state.scraping_status['is_running']:
+                logger.info("Scraping stopped by user")
                 break
-                
+            
             try:
-                # Update status
-                global_state.scraping_status['current_status'] = f"Processing query {idx}/{len(queries)}: {query}"
-                global_state.scraping_status['progress'] = idx
+                status_message = f"Processing query {idx}/{len(queries)}: {query}"
+                logger.info(status_message)
+                global_state.scraping_status.update({
+                    'current_status': status_message,
+                    'progress': idx
+                })
                 
-                # Make request and process results
-                start_time = time.time()
-                response = request_manager.make_request(
-                    "https://example.com/search",
-                    params={'q': query}
-                )
-                request_time = time.time() - start_time
-                global_state.performance_optimizer.record_request_time(request_time)
+                # Direct web page scraping with rotating user agents
+                try:
+                    search_url = f"https://www.google.com/search?q={quote(query)}"
+                    response = request_manager.make_request(search_url)
+                    
+                    if response and response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        
+                        # Extract result URLs from the search page
+                        result_divs = soup.find_all('div', class_='g')
+                        for div in result_divs:
+                            try:
+                                link = div.find('a')
+                                if not link:
+                                    continue
+                                    
+                                url = link.get('href', '')
+                                if not url or not url.startswith('http'):
+                                    continue
+                                    
+                                if url in global_state.data_manager.processed_urls:
+                                    continue
+                                
+                                # Process each result page
+                                result_response = request_manager.make_request(url)
+                                if result_response and result_response.status_code == 200:
+                                    result_soup = BeautifulSoup(result_response.text, 'html.parser')
+                                    result = extract_contact_details(result_soup, url, country)
+                                    
+                                    if result:
+                                        global_state.data_manager.results.append(result)
+                                        global_state.monitoring_system.record_extraction(True)
+                                        logger.info(f"Successfully extracted data from: {url}")
+                                    
+                                    global_state.data_manager.processed_urls.add(url)
+                                
+                                # Rate limiting
+                                time.sleep(random.uniform(1.5, 3.0))
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing result URL: {str(e)}")
+                                continue
+                    
+                except Exception as e:
+                    logger.error(f"Error in search request: {str(e)}")
+                    time.sleep(random.uniform(5.0, 10.0))  # Longer delay on errors
+                    continue
                 
-                # Process response
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    result = extract_contact_details(soup, response.url, country)
-                    if result:
-                        global_state.data_manager.results.append(result)
-                        global_state.monitoring_system.record_extraction(True)
-                    else:
-                        global_state.monitoring_system.record_extraction(False)
-                
-                # Save interim results periodically
-                if idx % 10 == 0:
+                # Save interim results
+                if idx % 5 == 0:
                     global_state.data_manager.save_interim()
-                
+                    
             except Exception as e:
+                logger.error(f"Error processing query '{query}': {str(e)}")
                 global_state.error_tracker.record_error(e, f"Query: {query}")
                 continue
-                
+            
+            # Delay between queries
+            time.sleep(random.uniform(3.0, 5.0))
+        
         # Final cleanup
         global_state.monitoring_system.end_session()
-        global_state.scraping_status['is_running'] = False
-        global_state.scraping_status['current_status'] = "Completed"
+        global_state.scraping_status.update({
+            'is_running': False,
+            'current_status': "Completed",
+            'progress': len(queries)
+        })
         global_state.data_manager.save_interim()
+        logger.info("Scraping process completed")
         
     except Exception as e:
-        logger.error(f"Scraping worker failed: {str(e)}\n{traceback.format_exc()}")
-        global_state.scraping_status['current_status'] = f"Failed: {str(e)}"
-        global_state.scraping_status['is_running'] = False
+        error_message = f"Scraping worker failed: {str(e)}"
+        logger.error(f"{error_message}\n{traceback.format_exc()}")
+        global_state.scraping_status.update({
+            'current_status': f"Failed: {str(e)}",
+            'is_running': False
+        })
 
 @app.route('/health')
 def health_check():
@@ -540,7 +746,13 @@ def health_check():
 @app.route('/')
 def home():
     try:
+        # Get list of countries
+        countries = [(country.alpha_2, country.name) 
+                    for country in pycountry.countries]
+        countries.sort(key=lambda x: x[1])  # Sort by country name
+        
         return render_template('index.html',
+                             countries=countries,
                              industry_keywords=Keywords.INDUSTRY_KEYWORDS,
                              business_keywords=Keywords.BUSINESS_KEYWORDS)
     except Exception as e:
