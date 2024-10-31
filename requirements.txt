@@ -1,8 +1,7 @@
---find-links=https://wheel-index.linuxserver.io/ubuntu/
-streamlit==1.24.0
+Flask==2.3.3
 requests==2.31.0
 beautifulsoup4==4.12.2
 pandas==1.5.3
 phonenumbers==8.13.14
 nltk==3.8.1
-pillow==9.5.0
+gunicorn==21.2.0
