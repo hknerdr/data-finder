@@ -94,7 +94,7 @@
                         document.getElementById('downloadSection').style.display = 'block';
                     }
 
-                    if (data.current_status !== 'Ready') {
+                    if (data.current_status !== 'Ready' && data.current_status !== 'Completed') {
                         addLogMessage(data.current_status);
                     }
                 })

@@ -6,7 +6,7 @@ import time
 import re
 import phonenumbers
 import logging
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote_plus
 import datetime
 from datetime import datetime, timedelta
 import json
@@ -25,9 +25,48 @@ import traceback
 from werkzeug.exceptions import HTTPException
 import sys
 import pycountry
+
+# ProxyConfig ve ProxyConfigManager tanımları
+from dataclasses import dataclass
+from typing import Dict
+
+@dataclass
+class ProxyConfig:
+    protocol: str
+    host: str
+    port: int
+    username: str
+    password: str
+    
+    def get_url(self) -> str:
+        if self.username and self.password:
+            return f"{self.protocol}://{self.username}:{self.password}@{self.host}:{self.port}"
+        return f"{self.protocol}://{self.host}:{self.port}"
+    
+    def to_dict(self) -> Dict[str, str]:
+        proxy_url = self.get_url()
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+
+class ProxyConfigManager:
+    def __init__(self, config_path: str = "config/proxy_config.json"):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        self.proxies = [ProxyConfig(**proxy) for proxy in config.get('proxies', [])]
+        self.settings = config.get('settings', {})
+    
+    def get_proxy(self) -> Optional[ProxyConfig]:
+        if not self.proxies:
+            return None
+        # Implement proxy rotation logic if needed
+        return random.choice(self.proxies)
+
+# Initialize NLTK (removed if not used)
+# Eğer kullanmıyorsanız, aşağıdaki kısımları kaldırabilirsiniz
 import nltk  # Added import
 
-# Initialize NLTK (ensure it's imported)
 try:
     nltk.data.path.append('/opt/render/nltk_data')
     nltk.download('punkt', quiet=True, download_dir='/opt/render/nltk_data')
@@ -127,6 +166,7 @@ class SearchEngine:
     def __init__(self):
         self.session = requests.Session()
         self.user_agent = UserAgent()
+        self.proxy_manager = ProxyConfigManager()  # Initialize proxy manager
     
     def search(self, query: str, country_code: str) -> List[str]:
         try:
@@ -140,24 +180,35 @@ class SearchEngine:
                 'Upgrade-Insecure-Requests': '1'
             }
             
-            # Example using DuckDuckGo (you can modify for other search engines)
+            # Example using Google Search
             params = {
                 'q': query,
-                'kl': f'region:{country_code}',
-                'format': 'json'
+                'hl': 'en',
+                'num': 10  # Number of results per page
             }
             
+            # Get proxy if available
+            proxy = self.proxy_manager.get_proxy()
+            proxies = proxy.to_dict() if proxy else None
+            
             response = self.session.get(
-                'https://api.duckduckgo.com/',
+                'https://www.google.com/search',
                 params=params,
                 headers=headers,
+                proxies=proxies,
                 timeout=10
             )
             
-            # Process results (modify according to the search engine's response format)
+            # Process results
             if response.status_code == 200:
-                results = response.json()
-                return [result['url'] for result in results.get('Results', [])]
+                soup = BeautifulSoup(response.text, 'html.parser')
+                results = []
+                for g in soup.find_all('div', class_='g'):
+                    anchors = g.find_all('a')
+                    if anchors:
+                        url = anchors[0]['href']
+                        results.append(url)
+                return results
             
             return []
                 
@@ -182,6 +233,7 @@ class GlobalState:
         self.error_tracker = None
         self.metrics_collector = None
         self.search_engine = SearchEngine()  # Now correctly defined
+        self.lock = threading.Lock()
     
     def initialize(self):
         try:
@@ -230,11 +282,11 @@ class DataManager:
     
     def save_interim(self):
         try:
-            with open(self.interim_file, 'w') as f:
+            with open(self.interim_file, 'w', encoding='utf-8') as f:
                 json.dump({
                     'results': self.results,
                     'processed_urls': list(self.processed_urls)
-                }, f)
+                }, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved interim results to {self.interim_file}")
         except Exception as e:
             logger.error(f"Failed to save interim results: {e}")
@@ -242,7 +294,7 @@ class DataManager:
     def load_interim(self) -> bool:
         try:
             if self.interim_file.exists():
-                with open(self.interim_file, 'r') as f:
+                with open(self.interim_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.results = data.get('results', [])
                     self.processed_urls = set(data.get('processed_urls', []))
@@ -257,16 +309,22 @@ class DataManager:
         try:
             if format == 'csv':
                 filename = Config.RESULTS_DIR / f"results_{timestamp}.csv"
-                with open(filename, 'w', newline='') as f:
+                with open(filename, 'w', newline='', encoding='utf-8') as f:
                     if self.results:
-                        writer = csv.DictWriter(f, fieldnames=self.results[0].keys())
+                        # Flatten Emails list into a single string
+                        fieldnames = ['URL', 'Emails']
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
                         writer.writeheader()
-                        writer.writerows(self.results)
+                        for result in self.results:
+                            writer.writerow({
+                                'URL': result.get('URL', ''),
+                                'Emails': ', '.join(result.get('Emails', []))
+                            })
                 return str(filename)
             elif format == 'json':
                 filename = Config.RESULTS_DIR / f"results_{timestamp}.json"
-                with open(filename, 'w') as f:
-                    json.dump(self.results, f, indent=2)
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(self.results, f, indent=2, ensure_ascii=False)
                 return str(filename)
         except Exception as e:
             logger.error(f"Failed to export results: {e}")
@@ -314,17 +372,13 @@ class DataCleaner:
     
     @staticmethod
     def remove_duplicates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        seen = set()
+        seen_urls = set()
         cleaned = []
         
         for result in results:
-            key = (
-                DataCleaner.clean_company_name(result.get('Name', '')),
-                DataCleaner.normalize_email(result.get('Email', '')),
-                DataCleaner.normalize_phone(result.get('Phone', ''), 'US')
-            )
-            if key not in seen and any(k for k in key):
-                seen.add(key)
+            url = result.get('URL')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
                 cleaned.append(result)
         return cleaned
 
@@ -448,7 +502,7 @@ class DataValidator:
     def validate_email(email: str) -> bool:
         if not email or email == 'N/A':
             return False
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        email_pattern = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
         return bool(re.match(email_pattern, email))
     
     @staticmethod
@@ -495,14 +549,13 @@ class MetricsCollector:
         with self.lock:
             self.metrics.update(new_metrics)
 
-# The SearchEngine class is already defined above
-
 # Request Manager Class
 class RequestManager:
     def __init__(self):
         self.ua = UserAgent()
         self.session = requests.Session()
         self.request_count = 0
+        self.proxy_manager = ProxyConfigManager()
     
     def get_headers(self) -> Dict[str, str]:
         self.request_count += 1
@@ -525,12 +578,18 @@ class RequestManager:
     )
     def make_request(self, url: str, method: str = 'get', **kwargs) -> Optional[requests.Response]:
         try:
+            headers = self.get_headers()
             kwargs.update({
-                'headers': self.get_headers(),
+                'headers': headers,
                 'timeout': Config.REQUEST_TIMEOUT,
                 'verify': True,
                 'allow_redirects': True
             })
+            
+            # Get proxy if available
+            proxy = self.proxy_manager.get_proxy()
+            proxies = proxy.to_dict() if proxy else None
+            kwargs['proxies'] = proxies
             
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
@@ -578,6 +637,25 @@ def home():
         logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
+# Email Extraction Regex
+EMAIL_REGEX = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
+
+def extract_emails(text):
+    return re.findall(EMAIL_REGEX, text)
+
+def extract_emails_from_url(url: str, request_manager: RequestManager) -> List[str]:
+    """Fetches the content of a URL and extracts email addresses."""
+    try:
+        response = request_manager.make_request(url)
+        if response and response.status_code == 200:
+            emails = extract_emails(response.text)
+            # Validate emails
+            valid_emails = [email for email in emails if DataValidator.validate_email(email)]
+            return list(set(valid_emails))  # Remove duplicates
+    except Exception as e:
+        logger.error(f"Failed to extract emails from {url}: {str(e)}")
+    return []
+
 # Define the generate_search_queries function
 def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
     """
@@ -597,7 +675,8 @@ def scraping_worker(country: str, keywords: List[str] = None):
     """Worker function for scraping process"""
     try:
         queries = generate_search_queries(country, keywords)
-        global_state.scraping_status['total'] = len(queries)
+        with global_state.lock:
+            global_state.scraping_status['total'] = len(queries)
         
         global_state.monitoring_system.start_session()
         logger.info(f"Starting scraping for country: {country} with {len(queries)} queries")
@@ -605,66 +684,69 @@ def scraping_worker(country: str, keywords: List[str] = None):
         request_manager = RequestManager()
         
         for idx, query in enumerate(queries, 1):
-            if not global_state.scraping_status['is_running']:
-                logger.info("Scraping stopped by user")
-                break
+            with global_state.lock:
+                if not global_state.scraping_status['is_running']:
+                    logger.info("Scraping stopped by user")
+                    break
             
             try:
                 status_message = f"Processing query {idx}/{len(queries)}: {query}"
                 logger.info(status_message)
-                global_state.scraping_status.update({
-                    'current_status': status_message,
-                    'progress': idx
-                })
+                with global_state.lock:
+                    global_state.scraping_status['current_status'] = status_message
+                    global_state.scraping_status['progress'] = idx
                 
-                # Use multiple search domains to avoid blocking
-                search_domains = [
-                    "www.bing.com/search",
-                    "search.yahoo.com/search",
-                    "www.ecosia.org/search"
-                ]
+                # Use only Google as the search engine
+                search_domain = "www.google.com/search"
+                search_url = f"https://{search_domain}?q={quote_plus(query)}"
                 
-                for search_domain in search_domains:
-                    try:
-                        search_url = f"https://{search_domain}?q={quote(query)}"
-                        response = request_manager.make_request(search_url)
+                response = request_manager.make_request(search_url)
+                
+                if response and response.status_code == 200:
+                    # Process results...
+                    # Extract search result links
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    results = []
+                    for g in soup.find_all('div', class_='g'):
+                        anchors = g.find_all('a')
+                        if anchors:
+                            url = anchors[0]['href']
+                            if "http" in url:
+                                results.append(url)
+                    
+                    # Visit each URL and extract emails
+                    for url in results:
+                        with global_state.lock:
+                            if url in global_state.data_manager.processed_urls:
+                                continue
+                            global_state.data_manager.processed_urls.add(url)
                         
-                        if response and response.status_code == 200:
-                            # Process results...
-                            # Extract and parse the response content
-                            soup = BeautifulSoup(response.text, 'html.parser')
-                            
-                            # Example: Extract search result links
-                            results = []
-                            for link in soup.find_all('a', href=True):
-                                url = link['href']
-                                # Filter out irrelevant links
-                                if "http" in url:
-                                    results.append(url)
-                            
-                            # Store the results
-                            for url in results:
-                                if url not in global_state.scraping_status['results']:
-                                    global_state.scraping_status['results'].append({
-                                        'URL': url
-                                    })
-                            
-                            # Update progress
-                            global_state.monitoring_system.record_extraction(True)
-                            global_state.metrics_collector.update_metrics({
-                                'last_processed_query': query,
-                                'total_extracted_links': len(results)
-                            })
-                            
-                            logger.debug(f"Successfully fetched data from {search_domain}: {len(results)} links")
-                            
-                            time.sleep(random.uniform(2.0, 4.0))
-                            break  # Successfully got results, move to next query
-                        
-                    except Exception as e:
-                        logger.error(f"Search failed for {search_domain}: {str(e)}")
-                        global_state.error_tracker.record_error(e, context=search_domain)
-                        continue
+                        email_addresses = extract_emails_from_url(url, request_manager)
+                        if email_addresses:
+                            with global_state.lock:
+                                global_state.scraping_status['results'].append({
+                                    'URL': url,
+                                    'Emails': email_addresses
+                                })
+                            logger.debug(f"Extracted emails from {url}: {email_addresses}")
+                        else:
+                            with global_state.lock:
+                                global_state.scraping_status['results'].append({
+                                    'URL': url,
+                                    'Emails': []
+                                })
+                    
+                    # Update progress
+                    global_state.monitoring_system.record_extraction(True)
+                    global_state.metrics_collector.update_metrics({
+                        'last_processed_query': query,
+                        'total_extracted_links': len(results)
+                    })
+                    
+                    logger.debug(f"Successfully fetched data from Google: {len(results)} links")
+                    
+                    time.sleep(random.uniform(2.0, 4.0))
                 
                 # Rate limiting
                 time.sleep(random.uniform(3.0, 5.0))
@@ -677,33 +759,37 @@ def scraping_worker(country: str, keywords: List[str] = None):
             
             # Save interim results periodically
             if idx % 50 == 0:
-                global_state.data_manager.results = global_state.scraping_status['results']
+                with global_state.lock:
+                    global_state.data_manager.results = global_state.scraping_status['results']
                 global_state.data_manager.save_interim()
         
         # After all queries are processed
         # Perform data cleaning and deduplication
-        cleaned_results = DataCleaner.remove_duplicates(global_state.scraping_status['results'])
-        global_state.scraping_status['results'] = cleaned_results
+        with global_state.lock:
+            cleaned_results = DataCleaner.remove_duplicates(global_state.scraping_status['results'])
+            global_state.scraping_status['results'] = cleaned_results
         
         # Save final results
         global_state.data_manager.results = cleaned_results
         global_state.data_manager.save_interim()
         
         # Update scraping status
-        global_state.scraping_status.update({
-            'is_running': False,
-            'current_status': "Completed",
-            'progress': len(queries)
-        })
+        with global_state.lock:
+            global_state.scraping_status.update({
+                'is_running': False,
+                'current_status': "Completed",
+                'progress': len(queries)
+            })
         logger.info("Scraping process completed")
         
     except Exception as e:
         logger.error(f"Scraping worker failed: {str(e)}")
         global_state.error_tracker.record_error(e, context="scraping_worker")
-        global_state.scraping_status.update({
-            'current_status': f"Failed: {str(e)}",
-            'is_running': False
-        })
+        with global_state.lock:
+            global_state.scraping_status.update({
+                'current_status': f"Failed: {str(e)}",
+                'is_running': False
+            })
 
 # Health Check Route
 @app.route('/health')
@@ -760,14 +846,17 @@ def start_scraping():
             keywords = []
         
         # Reset status and start new scraping session
-        global_state.scraping_status.update({
-            'is_running': True,
-            'progress': 0,
-            'total': 0,
-            'current_status': 'Starting...',
-            'results': [],
-            'errors': []
-        })
+        with global_state.lock:
+            global_state.scraping_status.update({
+                'is_running': True,
+                'progress': 0,
+                'total': 0,
+                'current_status': 'Starting...',
+                'results': [],
+                'errors': []
+            })
+            global_state.data_manager.results = []
+            global_state.data_manager.processed_urls = set()
         
         # Start scraping thread
         thread = threading.Thread(
@@ -791,7 +880,8 @@ def start_scraping():
 @app.route('/stop_scraping', methods=['POST'])
 def stop_scraping():
     try:
-        global_state.scraping_status['is_running'] = False
+        with global_state.lock:
+            global_state.scraping_status['is_running'] = False
         return jsonify({'message': 'Scraping stopped'})
     except Exception as e:
         logger.error(f"Error stopping scraping: {str(e)}")
@@ -801,12 +891,13 @@ def stop_scraping():
 @app.route('/status')
 def get_status():
     try:
-        return jsonify({
-            **global_state.scraping_status,
-            'metrics': global_state.metrics_collector.metrics if global_state.metrics_collector else {},
-            'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
-            'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {}
-        })
+        with global_state.lock:
+            return jsonify({
+                **global_state.scraping_status,
+                'metrics': global_state.metrics_collector.metrics if global_state.metrics_collector else {},
+                'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
+                'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {}
+            })
     except Exception as e:
         logger.error(f"Error getting status: {str(e)}")
         return jsonify({'error': str(e)}), 500

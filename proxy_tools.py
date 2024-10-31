@@ -33,6 +33,39 @@ class ProxyMetrics:
         total = self.success_count + self.failure_count
         return (self.success_count / total * 100) if total > 0 else 0
 
+@dataclass
+class ProxyConfig:
+    protocol: str
+    host: str
+    port: int
+    username: str
+    password: str
+    
+    def get_url(self) -> str:
+        if self.username and self.password:
+            return f"{self.protocol}://{self.username}:{self.password}@{self.host}:{self.port}"
+        return f"{self.protocol}://{self.host}:{self.port}"
+    
+    def to_dict(self) -> Dict[str, str]:
+        proxy_url = self.get_url()
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+
+class ProxyConfigManager:
+    def __init__(self, config_path: str = "config/proxy_config.json"):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        self.proxies = [ProxyConfig(**proxy) for proxy in config.get('proxies', [])]
+        self.settings = config.get('settings', {})
+    
+    def get_proxy(self) -> Optional[ProxyConfig]:
+        if not self.proxies:
+            return None
+        # Implement proxy rotation logic if needed
+        return random.choice(self.proxies)
+
 class ProxyTester:
     def __init__(self, config_path: str = "config/proxy_config.json"):
         self.config_path = Path(config_path)
@@ -128,7 +161,4 @@ class ProxyMonitor:
                     'success_count': metrics.success_count,
                     'failure_count': metrics.failure_count,
                     'last_success': metrics.last_success,
-                    'last_failure': metrics.last_failure
-                }
-                for proxy_url, metrics in self.metrics.items()
-            }
+                    'last_failure': metrics.last_
