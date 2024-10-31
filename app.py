@@ -10,17 +10,15 @@ import logging
 from urllib.parse import urlparse
 import datetime
 import nltk
-from nltk.tokenize import sent_tokenize
+
+# Download necessary NLTK data
+nltk.download('punkt', quiet=True)
+nltk.download('maxent_ne_chunker', quiet=True)
+nltk.download('words', quiet=True)
+nltk.download('averaged_perceptron_tagger', quiet=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
-
-# Download necessary NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-except:
-    st.warning("NLTK data download failed. Some features might be limited.")
 
 # Global variables
 stop_scraping = False
@@ -65,23 +63,10 @@ def can_crawl(url, user_agent='*'):
                     if parsed_url.path.startswith(disallowed_path):
                         return False
             return True
-        return True  # No robots.txt, proceed cautiously
+        else:
+            return True  # No robots.txt, proceed cautiously
     except Exception:
         return True  # If robots.txt can't be reached, proceed cautiously
-
-# Simple address extraction function
-def extract_address(text):
-    # Look for common address patterns
-    address_patterns = [
-        r'\d+\s+[A-Za-z0-9\s,.-]+(?:Road|Rd|Street|St|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr)\b',
-        r'\b[A-Za-z0-9\s,.-]+(?:Road|Rd|Street|St|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr)\s+\d+\b'
-    ]
-    
-    for pattern in address_patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            return matches[0]
-    return 'N/A'
 
 # Function to extract contact details from a website
 def extract_contact_details(url, country_code, proxies=None):
@@ -116,8 +101,34 @@ def extract_contact_details(url, country_code, proxies=None):
                 phone = phone_clean
                 break
 
-        # Extract address using simple pattern matching
-        address = extract_address(response.text)
+        # Extract addresses using regex
+        address_patterns = [
+            r'\d{1,5}\s[\w\s]{1,20},\s[\w\s]{1,20},\s[\w\s]{1,20}',  # e.g., 123 Main Street, City, State
+            r'\d{1,5}\s[\w\s]{1,20},\s[\w\s]{1,20}',                 # e.g., 123 Main Street, City
+            r'\d{1,5}\s[\w\s]{1,20}'                                 # e.g., 123 Main Street
+        ]
+
+        text = soup.get_text(separator=' ')
+
+        for pattern in address_patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                address = matches[0]
+                break
+
+        # Alternatively, use NLTK's Named Entity Recognition
+        if address == 'N/A':
+            sentences = nltk.sent_tokenize(text)
+            for sentence in sentences:
+                tokens = nltk.word_tokenize(sentence)
+                tags = nltk.pos_tag(tokens)
+                chunks = nltk.ne_chunk(tags, binary=False)
+                for chunk in chunks:
+                    if hasattr(chunk, 'label') and chunk.label() == 'GPE':
+                        address = ' '.join(c[0] for c in chunk.leaves())
+                        break
+                if address != 'N/A':
+                    break
 
         return {
             'Name': name,
@@ -137,7 +148,7 @@ def google_search(query, start_index, api_key, search_engine_id, proxies=None):
         'key': api_key,
         'cx': search_engine_id,
         'q': query,
-        'start': start_index
+        'start': start_index  # Start index for pagination
     }
     try:
         response = requests.get(url, params=params, proxies=proxies)
@@ -161,77 +172,67 @@ def main(api_key, search_engine_id, country, keywords_list, proxies=None):
     status_text = st.empty()
     start_time = time.time()
 
-    try:
-        for keyword in keywords_list:
+    for keyword in keywords_list:
+        if stop_scraping:
+            break
+        log(f"Searching for keyword: {keyword}")
+        for start_index in range(1, 101, 10):  # Pagination
             if stop_scraping:
                 break
-            log(f"Searching for keyword: {keyword}")
-            for start_index in range(1, 101, 10):  # Pagination
+            query = f"{keyword} in {country}"
+            search_results = google_search(query, start_index, api_key, search_engine_id, proxies)
+            if not search_results:
+                break
+            web_pages = search_results.get('items', [])
+            if not web_pages:
+                break
+            company_urls = [page.get('link') for page in web_pages if page.get('link')]
+
+            for company_url in company_urls:
                 if stop_scraping:
                     break
-                query = f"{keyword} in {country}"
-                search_results = google_search(query, start_index, api_key, search_engine_id, proxies)
-                if not search_results:
-                    break
-                web_pages = search_results.get('items', [])
-                if not web_pages:
-                    break
-                company_urls = [page.get('link') for page in web_pages if page.get('link')]
+                log(f"Visiting: {company_url}")
+                company_details = extract_contact_details(company_url, country_code=country, proxies=proxies)
+                if company_details:
+                    all_companies.append(company_details)
+                    # Save incrementally
+                    df = pd.DataFrame(all_companies)
+                    df.drop_duplicates(subset=['Website'], inplace=True)
+                    df.to_csv('beverage_companies.csv', index=False)
+                companies_processed += 1
 
-                for company_url in company_urls:
-                    if stop_scraping:
-                        break
-                    log(f"Visiting: {company_url}")
-                    company_details = extract_contact_details(company_url, country_code=country, proxies=proxies)
-                    if company_details:
-                        all_companies.append(company_details)
-                        # Save incrementally
-                        df = pd.DataFrame(all_companies)
-                        df.drop_duplicates(subset=['Website'], inplace=True)
-                        
-                        # Convert DataFrame to CSV string for download
-                        csv = df.to_csv(index=False)
-                        st.session_state['current_data'] = csv
-                        
-                    companies_processed += 1
+                # Update progress
+                elapsed_time = time.time() - start_time
+                if companies_processed > 0:
+                    time_per_company = elapsed_time / companies_processed
+                    companies_remaining = total_companies_estimate - companies_processed
+                    estimated_time_remaining = companies_remaining * time_per_company
+                    eta = datetime.timedelta(seconds=int(estimated_time_remaining))
+                    progress = companies_processed / total_companies_estimate
+                    progress_bar.progress(min(progress, 1.0))
+                    status_text.text(f"Processed {companies_processed}/{total_companies_estimate} companies, ETA: {eta}")
+                time.sleep(2)  # Polite delay
 
-                    # Update progress
-                    elapsed_time = time.time() - start_time
-                    if companies_processed > 0:
-                        time_per_company = elapsed_time / companies_processed
-                        companies_remaining = total_companies_estimate - companies_processed
-                        estimated_time_remaining = companies_remaining * time_per_company
-                        eta = datetime.timedelta(seconds=int(estimated_time_remaining))
-                        progress = companies_processed / total_companies_estimate
-                        progress_bar.progress(min(progress, 1.0))
-                        status_text.text(f"Processed {companies_processed}/{total_companies_estimate} companies, ETA: {eta}")
-                    time.sleep(2)  # Polite delay
+    if all_companies:
+        df = pd.DataFrame(all_companies)
+        df.drop_duplicates(subset=['Website'], inplace=True)
+        df.to_csv('beverage_companies_final.csv', index=False)
+        df.to_json('beverage_companies.json', orient='records', lines=True)
+        log("Data collection complete. Results saved to 'beverage_companies_final.csv' and 'beverage_companies.json'.")
+        st.success("Scraping completed successfully.")
+        # Provide a download link
+        st.markdown(get_table_download_link(df), unsafe_allow_html=True)
+    else:
+        log("No data collected.")
+        st.warning("No data collected.")
 
-        if all_companies:
-            df = pd.DataFrame(all_companies)
-            df.drop_duplicates(subset=['Website'], inplace=True)
-            
-            # Store the final data in session state
-            csv = df.to_csv(index=False)
-            st.session_state['final_data'] = csv
-            
-            log("Data collection complete.")
-            st.success("Scraping completed successfully.")
-            
-            # Provide download buttons
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name="beverage_companies.csv",
-                mime="text/csv"
-            )
-        else:
-            log("No data collected.")
-            st.warning("No data collected.")
-            
-    except Exception as e:
-        log(f"An error occurred during scraping: {e}")
-        st.error(f"An error occurred: {str(e)}")
+# Function to provide a download link for the DataFrame
+def get_table_download_link(df):
+    import base64
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="beverage_companies.csv">Download CSV File</a>'
+    return href
 
 # Function to generate combined keywords
 def generate_combined_keywords(industry_keywords, business_keywords):
@@ -249,18 +250,12 @@ def run_app():
     This application allows you to search for beverage distributors, wholesalers, and traders in a specified country.
 
     **Instructions:**
-    1. Enter the ISO country code (e.g., 'US', 'GB', 'AU')
-    2. Modify the default keywords if necessary
-    3. Enter your Google Custom Search API key and Search Engine ID
-    4. Optional: Enter proxy settings if required
-    5. Click **Start Scraping** to begin
+    - Enter the ISO country code (e.g., 'US', 'GB', 'AU').
+    - Modify the default keywords if necessary.
+    - Enter your Google Custom Search API key and Search Engine ID.
+    - Optional: Enter proxy settings if required.
+    - Click **Start Scraping** to begin.
     """)
-
-    # Initialize session state for data storage
-    if 'current_data' not in st.session_state:
-        st.session_state['current_data'] = None
-    if 'final_data' not in st.session_state:
-        st.session_state['final_data'] = None
 
     # Input fields
     country = st.text_input("Country (ISO country code, e.g., 'US', 'GB'):")
@@ -283,7 +278,24 @@ def run_app():
         'Plant-Based Beverages',
         'Smoothies',
         'Iced Tea',
-        'Ready-to-Drink Coffee'
+        'Ready-to-Drink Coffee',
+        'Mocktails',
+        'Kombucha',
+        'Vitamin Water',
+        'Refreshment',
+        'Drink',
+        'Liquid Refreshment',
+        'Hydration Products',
+        'Thirst Quencher',
+        'Soda',
+        'Pop',
+        'Fizzy Drinks',
+        'Aerated Drinks',
+        'Juice Drinks',
+        'Fruit Beverages',
+        'Nonalcoholic Beverage',
+        'Non Alcoholic Beverage',
+        'Non-Alcoholic Drinks'
     ]
 
     business_keywords = [
@@ -301,7 +313,22 @@ def run_app():
         'Broker',
         'Trading Company',
         'Bulk Supplier',
-        'B2B Supplier'
+        'B2B Supplier',
+        'Distribution Company',
+        'Wholesale Distributor',
+        'Supply Chain',
+        'Logistics Provider',
+        'Beverage Services',
+        'Retail Supplier',
+        'Beverage Network',
+        'Commercial Supplier',
+        'Wholesale Market',
+        'Wholeseller',  # Common misspelling
+        'B2B Beverage Supplier',
+        'Bulk Beverage Distributor',
+        'Wholesale Beverage Market',
+        'Beverage Supply Chain Partner',
+        'Trade Beverage Supplier'
     ]
 
     # Generate combined keywords
@@ -325,35 +352,22 @@ def run_app():
             }
 
     # Start and Stop buttons
-    col1, col2 = st.columns(2)
-    with col1:
-        start_button = st.button("Start Scraping")
-    with col2:
-        stop_button = st.button("Stop Scraping")
+    start_button = st.button("Start Scraping")
+    stop_button = st.button("Stop Scraping")
 
     if start_button:
         if not country or not keywords_input or not api_key or not search_engine_id:
-            st.error("Please fill in all required fields.")
+            st.error("Please fill in all fields.")
         else:
             keywords_list = [k.strip() for k in keywords_input.split('\n') if k.strip()]
             # Start scraping in a new thread
-            thread = threading.Thread(target=main, args=(api_key, search_engine_id, country, keywords_list, proxies))
-            thread.start()
+            threading.Thread(target=main, args=(api_key, search_engine_id, country, keywords_list, proxies)).start()
 
     if stop_button:
         global stop_scraping
         stop_scraping = True
         log("Scraping process stopped by user.")
         st.warning("Scraping process stopped by user.")
-
-    # Show current data if available
-    if st.session_state['current_data']:
-        st.download_button(
-            label="Download Current Progress",
-            data=st.session_state['current_data'],
-            file_name="beverage_companies_progress.csv",
-            mime="text/csv"
-        )
 
 if __name__ == "__main__":
     run_app()
