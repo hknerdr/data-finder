@@ -1,3 +1,5 @@
+# app_part1.py
+
 from flask import Flask, render_template, request, jsonify, send_file
 import requests
 from bs4 import BeautifulSoup
@@ -44,6 +46,30 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Initialization Middleware
+class InitializationMiddleware:
+    def __init__(self, app):
+        self.app = app
+        self._initialized = False
+        self._init_lock = threading.Lock()
+
+    def __call__(self, environ, start_response):
+        if not self._initialized:
+            with self._init_lock:
+                if not self._initialized:
+                    try:
+                        Config.initialize_directories()
+                        global_state.initialize()
+                        logger.info("Application initialized successfully")
+                        self._initialized = True
+                    except Exception as e:
+                        logger.error(f"Failed to initialize application: {e}\n{traceback.format_exc()}")
+                        raise
+        return self.app(environ, start_response)
+
+# Apply middleware
+app.wsgi_app = InitializationMiddleware(app.wsgi_app)
+
 # Configuration and Keywords
 class Keywords:
     INDUSTRY_KEYWORDS = [
@@ -83,7 +109,6 @@ class Config:
             logger.error(f"Failed to initialize directories: {e}")
             raise
 
-# Global state
 class GlobalState:
     def __init__(self):
         self.scraping_status = {
@@ -112,12 +137,27 @@ class GlobalState:
             logger.error(f"Failed to initialize global state: {e}")
             raise
 
+# Initialize global state
 global_state = GlobalState()
 
 # Initialize directories
 Config.initialize_directories()
 
-# Data Management Classes
+# app_part2.py
+
+from datetime import datetime, timedelta
+import json
+import csv
+from typing import Dict, List, Any
+from dataclasses import dataclass
+import re
+import phonenumbers
+import logging
+from pathlib import Path
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class ScrapingMetrics:
     start_time: datetime = None
@@ -248,6 +288,21 @@ class DataCleaner:
                 cleaned.append(result)
         return cleaned
 
+# app_part3.py
+
+import threading
+import statistics
+from datetime import datetime
+import requests
+from requests.exceptions import RequestException, ProxyError
+from typing import Dict, List, Any
+import logging
+from urllib.parse import urlparse
+import phonenumbers
+import re
+
+logger = logging.getLogger(__name__)
+
 class MonitoringSystem:
     def __init__(self):
         self.metrics = ScrapingMetrics()
@@ -294,7 +349,6 @@ class MonitoringSystem:
                 'error_count': len(self.error_log)
             }
 
-# Performance Optimization and Validation Classes
 class PerformanceOptimizer:
     def __init__(self):
         self.request_times = []
@@ -410,115 +464,30 @@ class DataValidator:
             score += 0.2
         return score
 
-# Request Handling and Scraping Functions
-class RequestManager:
+class MetricsCollector:
     def __init__(self):
-        self.ua = UserAgent()
-        self.session = requests.Session()
-        self.request_count = 0
-    
-    def get_headers(self) -> Dict[str, str]:
-        self.request_count += 1
-        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
-            self.ua = UserAgent()
-        
-        return {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-        }
-    
-    @retry(
-        stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
-        wait=wait_exponential(multiplier=1, min=4, max=10)
-    )
-    def make_request(self, url: str, method: str = 'get', **kwargs) -> requests.Response:
-        try:
-            kwargs.update({
-                'headers': self.get_headers(),
-                'timeout': Config.REQUEST_TIMEOUT,
-                'verify': True
-            })
-            
-            response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-            
-            time.sleep(Config.RATE_LIMIT_DELAY)
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Request failed for {url}: {str(e)}")
-            raise
+        self.metrics = {}
+        self.lock = threading.Lock()
 
-def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
-    """Generate search queries combining keywords"""
-    queries = []
-    
-    if not keywords:
-        for industry, business in itertools.product(
-            Keywords.INDUSTRY_KEYWORDS, 
-            Keywords.BUSINESS_KEYWORDS
-        ):
-            queries.append(f"{industry} {business} in {country}")
-    else:
-        for keyword in keywords:
-            if keyword.strip():
-                queries.append(f"{keyword.strip()} in {country}")
-    
-    return queries
+    def update_metrics(self, new_metrics: Dict[str, Any]):
+        with self.lock:
+            self.metrics.update(new_metrics)
 
-def extract_contact_details(soup: BeautifulSoup, url: str, country: str) -> Optional[Dict[str, Any]]:
-    """Extract contact information from webpage"""
-    try:
-        # Extract title/company name
-        title = soup.title.string if soup.title else 'N/A'
-        
-        # Extract emails
-        emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-.]+', str(soup))
-        email = next((e for e in emails if DataValidator.validate_email(e)), 'N/A')
-        
-        # Extract phones
-        phones = re.findall(r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]', str(soup))
-        phone = next((p for p in phones if DataValidator.validate_phone(p, country)), 'N/A')
-        
-        # Extract address (basic implementation)
-        address = 'N/A'
-        address_patterns = [
-            r'\d+\s+[A-Za-z0-9\s,.-]+(?:Road|Rd|Street|St|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr)\b',
-            r'[A-Za-z0-9\s]+(?:Business Park|Industrial Estate|Technology Park|Office Park|Center|Centre)'
-        ]
-        for pattern in address_patterns:
-            matches = re.findall(pattern, str(soup), re.IGNORECASE)
-            if matches:
-                address = matches[0]
-                break
-        
-        return {
-            'Name': DataCleaner.clean_company_name(title),
-            'Email': email,
-            'Phone': phone,
-            'Address': address,
-            'Website': url
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to extract details from {url}: {str(e)}")
-        return None
+# app_part4.py
 
-# Flask Routes and API Endpoints
-@app.before_first_request
-def initialize_app():
-    try:
-        Config.initialize_directories()
-        global_state.initialize()
-        logger.info("Application initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize application: {e}\n{traceback.format_exc()}")
-        raise
+from flask import Flask, render_template, request, jsonify, send_file
+import logging
+from datetime import datetime
+import threading
+import traceback
+from werkzeug.exceptions import HTTPException
+import os
+import sys
+
+logger = logging.getLogger(__name__)
+
+# Import the app instance from part 1
+from app_part1 import app, global_state, Config
 
 @app.errorhandler(Exception)
 def handle_exception(e):
@@ -681,19 +650,14 @@ def get_errors():
         logger.error(f"Error getting errors: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+def create_app():
+    return app
+
 # Main entry point
 if __name__ == '__main__':
     try:
-        # Ensure directories exist
-        Config.initialize_directories()
-        
-        # Initialize global state
-        global_state.initialize()
-        
-        # Start the application
         port = int(os.environ.get('PORT', 5000))
         app.run(host='0.0.0.0', port=port, debug=False)
-        
     except Exception as e:
         logger.critical(f"Failed to start application: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
