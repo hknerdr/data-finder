@@ -1,8 +1,8 @@
-streamlit
-requests
-beautifulsoup4
-pandas
-phonenumbers
-nltk
-spacy
+streamlit==1.25.0
+requests==2.31.0
+beautifulsoup4==4.12.2
+pandas==1.5.3
+phonenumbers==8.13.14
+nltk==3.8.1
+spacy==3.5.0
 en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.5.0/en_core_web_sm-3.5.0.tar.gz

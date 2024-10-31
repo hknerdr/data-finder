@@ -10,9 +10,10 @@ import logging
 from urllib.parse import urlparse
 import datetime
 import nltk
-from nltk import sent_tokenize
-from nltk.corpus import stopwords
 import spacy
+
+# Configure logging
+logging.basicConfig(filename='scraper.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
 
 # Download necessary NLTK data
 nltk.download('punkt', quiet=True)
@@ -24,7 +25,8 @@ try:
 except OSError:
     # Download the model if not already present
     with st.spinner("Downloading spaCy language model..."):
-        spacy.cli.download('en_core_web_sm')
+        from spacy.cli import download
+        download('en_core_web_sm')
     nlp = spacy.load('en_core_web_sm')
 
 # Configure logging
