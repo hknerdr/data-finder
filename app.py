@@ -1,5 +1,3 @@
-# app_part1.py
-
 from flask import Flask, render_template, request, jsonify, send_file
 import requests
 from bs4 import BeautifulSoup
@@ -32,12 +30,19 @@ import traceback
 from werkzeug.exceptions import HTTPException
 import sys
 
+# NLTK Setup
+try:
+    nltk.download('punkt', quiet=True)
+except Exception as e:
+    logger.warning(f"Failed to download NLTK data: {e}")
+
 # Configure logging
+log_file = os.path.join(os.getenv('RENDER_APP_DIR', os.getcwd()), 'scraper.log')
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
-        logging.FileHandler('scraper.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -109,6 +114,7 @@ class Config:
             logger.error(f"Failed to initialize directories: {e}")
             raise
 
+# Global state
 class GlobalState:
     def __init__(self):
         self.scraping_status = {
@@ -137,27 +143,12 @@ class GlobalState:
             logger.error(f"Failed to initialize global state: {e}")
             raise
 
-# Initialize global state
 global_state = GlobalState()
 
 # Initialize directories
 Config.initialize_directories()
 
-# app_part2.py
-
-from datetime import datetime, timedelta
-import json
-import csv
-from typing import Dict, List, Any
-from dataclasses import dataclass
-import re
-import phonenumbers
-import logging
-from pathlib import Path
-from urllib.parse import urlparse
-
-logger = logging.getLogger(__name__)
-
+# Data Management Classes
 @dataclass
 class ScrapingMetrics:
     start_time: datetime = None
@@ -287,21 +278,6 @@ class DataCleaner:
                 seen.add(key)
                 cleaned.append(result)
         return cleaned
-
-# app_part3.py
-
-import threading
-import statistics
-from datetime import datetime
-import requests
-from requests.exceptions import RequestException, ProxyError
-from typing import Dict, List, Any
-import logging
-from urllib.parse import urlparse
-import phonenumbers
-import re
-
-logger = logging.getLogger(__name__)
 
 class MonitoringSystem:
     def __init__(self):
@@ -473,22 +449,6 @@ class MetricsCollector:
         with self.lock:
             self.metrics.update(new_metrics)
 
-# app_part4.py
-
-from flask import Flask, render_template, request, jsonify, send_file
-import logging
-from datetime import datetime
-import threading
-import traceback
-from werkzeug.exceptions import HTTPException
-import os
-import sys
-
-logger = logging.getLogger(__name__)
-
-# Import the app instance from part 1
-from app_part1 import app, global_state, Config
-
 @app.errorhandler(Exception)
 def handle_exception(e):
     logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
@@ -505,6 +465,62 @@ def handle_exception(e):
         error_details['traceback'] = traceback.format_exc()
     
     return jsonify(error_details), 500
+
+def scraping_worker(country: str, keywords: List[str] = None):
+    """Worker function for scraping process"""
+    try:
+        request_manager = RequestManager()
+        queries = generate_search_queries(country, keywords)
+        global_state.scraping_status['total'] = len(queries)
+        
+        global_state.monitoring_system.start_session()
+        
+        for idx, query in enumerate(queries, 1):
+            if not global_state.scraping_status['is_running']:
+                break
+                
+            try:
+                # Update status
+                global_state.scraping_status['current_status'] = f"Processing query {idx}/{len(queries)}: {query}"
+                global_state.scraping_status['progress'] = idx
+                
+                # Make request and process results
+                start_time = time.time()
+                response = request_manager.make_request(
+                    "https://example.com/search",
+                    params={'q': query}
+                )
+                request_time = time.time() - start_time
+                global_state.performance_optimizer.record_request_time(request_time)
+                
+                # Process response
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    result = extract_contact_details(soup, response.url, country)
+                    if result:
+                        global_state.data_manager.results.append(result)
+                        global_state.monitoring_system.record_extraction(True)
+                    else:
+                        global_state.monitoring_system.record_extraction(False)
+                
+                # Save interim results periodically
+                if idx % 10 == 0:
+                    global_state.data_manager.save_interim()
+                
+            except Exception as e:
+                global_state.error_tracker.record_error(e, f"Query: {query}")
+                continue
+                
+        # Final cleanup
+        global_state.monitoring_system.end_session()
+        global_state.scraping_status['is_running'] = False
+        global_state.scraping_status['current_status'] = "Completed"
+        global_state.data_manager.save_interim()
+        
+    except Exception as e:
+        logger.error(f"Scraping worker failed: {str(e)}\n{traceback.format_exc()}")
+        global_state.scraping_status['current_status'] = f"Failed: {str(e)}"
+        global_state.scraping_status['is_running'] = False
 
 @app.route('/health')
 def health_check():
@@ -614,11 +630,16 @@ def download_results(format):
         if not filename:
             return jsonify({'error': 'Export failed'}), 500
         
-        return send_file(
-            filename,
-            as_attachment=True,
-            download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}'
-        )
+        try:
+            return send_file(
+                filename,
+                as_attachment=True,
+                download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}'
+            )
+        except Exception as e:
+            logger.error(f"Error sending file: {str(e)}")
+            return jsonify({'error': 'File delivery failed'}), 500
+            
     except Exception as e:
         logger.error(f"Error downloading results: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -653,7 +674,6 @@ def get_errors():
 def create_app():
     return app
 
-# Main entry point
 if __name__ == '__main__':
     try:
         port = int(os.environ.get('PORT', 5000))
