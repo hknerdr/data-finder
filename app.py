@@ -15,12 +15,17 @@ from nltk.corpus import stopwords
 import spacy
 
 # Download necessary NLTK data
-nltk.download('punkt')
-nltk.download('stopwords')
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
 
-# Load spaCy model for advanced NLP (make sure to install it first)
-# You may need to run: python -m spacy download en_core_web_sm
-nlp = spacy.load('en_core_web_sm')
+# Load spaCy model for advanced NLP
+try:
+    nlp = spacy.load('en_core_web_sm')
+except OSError:
+    # Download the model if not already present
+    with st.spinner("Downloading spaCy language model..."):
+        spacy.cli.download('en_core_web_sm')
+    nlp = spacy.load('en_core_web_sm')
 
 # Configure logging
 logging.basicConfig(filename='scraper.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
@@ -110,7 +115,7 @@ def extract_contact_details(url, country_code, proxies=None):
         doc = nlp(response.text)
         addresses = []
         for ent in doc.ents:
-            if ent.label_ == 'GPE' or ent.label_ == 'LOC':
+            if ent.label_ in ['GPE', 'LOC', 'FACILITY', 'ADDRESS']:
                 addresses.append(ent.text)
         address = addresses[0] if addresses else 'N/A'
 
@@ -234,7 +239,7 @@ def run_app():
     This application allows you to search for beverage distributors, wholesalers, and traders in a specified country.
 
     **Instructions:**
-    - Enter the country name.
+    - Enter the ISO country code (e.g., 'US', 'GB', 'AU').
     - Modify the default keywords if necessary.
     - Enter your Google Custom Search API key and Search Engine ID.
     - Optional: Enter proxy settings if required.
@@ -265,7 +270,21 @@ def run_app():
         'Ready-to-Drink Coffee',
         'Mocktails',
         'Kombucha',
-        'Vitamin Water'
+        'Vitamin Water',
+        'Refreshment',
+        'Drink',
+        'Liquid Refreshment',
+        'Hydration Products',
+        'Thirst Quencher',
+        'Soda',
+        'Pop',
+        'Fizzy Drinks',
+        'Aerated Drinks',
+        'Juice Drinks',
+        'Fruit Beverages',
+        'Nonalcoholic Beverage',
+        'Non Alcoholic Beverage',
+        'Non-Alcoholic Drinks'
     ]
 
     business_keywords = [
@@ -292,7 +311,13 @@ def run_app():
         'Retail Supplier',
         'Beverage Network',
         'Commercial Supplier',
-        'Wholesale Market'
+        'Wholesale Market',
+        'Wholeseller',  # Common misspelling
+        'B2B Beverage Supplier',
+        'Bulk Beverage Distributor',
+        'Wholesale Beverage Market',
+        'Beverage Supply Chain Partner',
+        'Trade Beverage Supplier'
     ]
 
     # Generate combined keywords
