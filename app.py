@@ -26,14 +26,17 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 import statistics
+import traceback
+from werkzeug.exceptions import HTTPException
+import sys
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
         logging.FileHandler('scraper.log'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
@@ -41,7 +44,22 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configuration classes
+# Configuration and Keywords
+class Keywords:
+    INDUSTRY_KEYWORDS = [
+        'Non-Alcoholic Beverages', 'Soft Drinks', 'Beverages', 'Juices', 'Mineral Water',
+        'Bottled Water', 'Energy Drinks', 'Sports Drinks', 'Carbonated Drinks',
+        'Flavored Water', 'Herbal Drinks', 'Functional Beverages', 'Dairy Beverages',
+        'Plant-Based Beverages', 'Smoothies', 'Iced Tea', 'Ready-to-Drink Coffee',
+        'Mocktails', 'Kombucha', 'Vitamin Water'
+    ]
+
+    BUSINESS_KEYWORDS = [
+        'Distributor', 'Wholesaler', 'Supplier', 'Trader', 'Dealer', 'Reseller',
+        'Stockist', 'Merchant', 'Importer', 'Exporter', 'Agency', 'Broker',
+        'Trading Company', 'Bulk Supplier', 'B2B Supplier'
+    ]
+
 class Config:
     RETRY_ATTEMPTS = 3
     REQUEST_TIMEOUT = 30
@@ -49,149 +67,57 @@ class Config:
     MAX_RESULTS_PER_QUERY = 20
     USER_AGENT_REFRESH_RATE = 10
     PROXY_ROTATION_RATE = 5
-    DATA_DIR = Path("data")
+    BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+    DATA_DIR = BASE_DIR / "data"
     RESULTS_DIR = DATA_DIR / "results"
     INTERIM_DIR = DATA_DIR / "interim"
     
     @classmethod
     def initialize_directories(cls):
-        cls.DATA_DIR.mkdir(exist_ok=True)
-        cls.RESULTS_DIR.mkdir(exist_ok=True)
-        cls.INTERIM_DIR.mkdir(exist_ok=True)
+        try:
+            cls.DATA_DIR.mkdir(exist_ok=True)
+            cls.RESULTS_DIR.mkdir(exist_ok=True)
+            cls.INTERIM_DIR.mkdir(exist_ok=True)
+            logger.info("Directories initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize directories: {e}")
+            raise
+
+# Global state
+class GlobalState:
+    def __init__(self):
+        self.scraping_status = {
+            'is_running': False,
+            'progress': 0,
+            'total': 0,
+            'current_status': 'Ready',
+            'results': [],
+            'errors': []
+        }
+        self.data_manager = None
+        self.monitoring_system = None
+        self.performance_optimizer = None
+        self.error_tracker = None
+        self.metrics_collector = None
+
+    def initialize(self):
+        try:
+            self.data_manager = DataManager()
+            self.monitoring_system = MonitoringSystem()
+            self.performance_optimizer = PerformanceOptimizer()
+            self.error_tracker = ErrorTracker()
+            self.metrics_collector = MetricsCollector()
+            logger.info("Global state initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize global state: {e}")
+            raise
+
+global_state = GlobalState()
 
 # Initialize directories
 Config.initialize_directories()
 
 # Data Management Classes
-class DataManager:
-    def __init__(self):
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.interim_file = Config.INTERIM_DIR / f"interim_{self.session_id}.json"
-        self.results = []
-        self.processed_urls = set()
-    
-    def save_interim(self):
-        """Save current results to interim storage"""
-        try:
-            with open(self.interim_file, 'w') as f:
-                json.dump({
-                    'results': self.results,
-                    'processed_urls': list(self.processed_urls)
-                }, f)
-            logger.info(f"Saved interim results to {self.interim_file}")
-        except Exception as e:
-            logger.error(f"Failed to save interim results: {e}")
-    
-    def load_interim(self) -> bool:
-        """Load results from interim storage if available"""
-        try:
-            if self.interim_file.exists():
-                with open(self.interim_file, 'r') as f:
-                    data = json.load(f)
-                    self.results = data.get('results', [])
-                    self.processed_urls = set(data.get('processed_urls', []))
-                logger.info(f"Loaded interim results: {len(self.results)} entries")
-                return True
-        except Exception as e:
-            logger.error(f"Failed to load interim results: {e}")
-        return False
-    
-    def export_results(self, format: str = 'csv') -> str:
-        """Export results in specified format"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        if format == 'csv':
-            filename = Config.RESULTS_DIR / f"results_{timestamp}.csv"
-            try:
-                with open(filename, 'w', newline='') as f:
-                    if self.results:
-                        writer = csv.DictWriter(f, fieldnames=self.results[0].keys())
-                        writer.writeheader()
-                        writer.writerows(self.results)
-                return str(filename)
-            except Exception as e:
-                logger.error(f"Failed to export CSV: {e}")
-        
-        elif format == 'json':
-            filename = Config.RESULTS_DIR / f"results_{timestamp}.json"
-            try:
-                with open(filename, 'w') as f:
-                    json.dump(self.results, f, indent=2)
-                return str(filename)
-            except Exception as e:
-                logger.error(f"Failed to export JSON: {e}")
-        
-        return ""
-
-class DataCleaner:
-    @staticmethod
-    def clean_text(text: str) -> str:
-        """Basic text cleaning"""
-        if not text:
-            return ""
-        text = re.sub(r'\s+', ' ', text)  # Remove extra whitespace
-        text = text.strip()
-        return text
-    
-    @staticmethod
-    def normalize_phone(phone: str, country_code: str) -> str:
-        """Normalize phone numbers to international format"""
-        try:
-            if not phone.startswith('+'):
-                phone = f"+{phone}"
-            parsed = phonenumbers.parse(phone, country_code)
-            if phonenumbers.is_valid_number(parsed):
-                return phonenumbers.format_number(
-                    parsed,
-                    phonenumbers.PhoneNumberFormat.INTERNATIONAL
-                )
-        except Exception as e:
-            logger.debug(f"Phone normalization failed: {e}")
-        return phone
-    
-    @staticmethod
-    def normalize_email(email: str) -> str:
-        """Normalize email addresses"""
-        return email.lower().strip()
-    
-    @staticmethod
-    def clean_company_name(name: str) -> str:
-        """Clean and normalize company names"""
-        if not name:
-            return ""
-        
-        # Remove common suffixes
-        suffixes = ['ltd', 'llc', 'inc', 'corp', 'corporation', 'co', 'company']
-        name = name.lower()
-        for suffix in suffixes:
-            name = re.sub(f"\\b{suffix}\\b", "", name)
-        
-        # Clean up remaining text
-        name = re.sub(r'[^\w\s-]', '', name)
-        name = re.sub(r'\s+', ' ', name)
-        return name.strip().title()
-    
-    @staticmethod
-    def remove_duplicates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Remove duplicate entries based on key fields"""
-        seen = set()
-        cleaned = []
-        
-        for result in results:
-            # Create unique key from cleaned essential fields
-            key = (
-                DataCleaner.clean_company_name(result.get('Name', '')),
-                DataCleaner.normalize_email(result.get('Email', '')),
-                DataCleaner.normalize_phone(result.get('Phone', ''), 'US')
-            )
-            
-            if key not in seen and any(k for k in key):  # Ensure at least one field has value
-                seen.add(key)
-                cleaned.append(result)
-        
-        return cleaned
-
-# Monitoring Classes
 @dataclass
 class ScrapingMetrics:
     start_time: datetime = None
@@ -214,6 +140,113 @@ class ScrapingMetrics:
         if self.total_requests == 0:
             return 0
         return (self.successful_extractions / self.total_requests) * 100
+
+class DataManager:
+    def __init__(self):
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.interim_file = Config.INTERIM_DIR / f"interim_{self.session_id}.json"
+        self.results = []
+        self.processed_urls = set()
+    
+    def save_interim(self):
+        try:
+            with open(self.interim_file, 'w') as f:
+                json.dump({
+                    'results': self.results,
+                    'processed_urls': list(self.processed_urls)
+                }, f)
+            logger.info(f"Saved interim results to {self.interim_file}")
+        except Exception as e:
+            logger.error(f"Failed to save interim results: {e}")
+    
+    def load_interim(self) -> bool:
+        try:
+            if self.interim_file.exists():
+                with open(self.interim_file, 'r') as f:
+                    data = json.load(f)
+                    self.results = data.get('results', [])
+                    self.processed_urls = set(data.get('processed_urls', []))
+                logger.info(f"Loaded interim results: {len(self.results)} entries")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to load interim results: {e}")
+        return False
+
+    def export_results(self, format: str = 'csv') -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            if format == 'csv':
+                filename = Config.RESULTS_DIR / f"results_{timestamp}.csv"
+                with open(filename, 'w', newline='') as f:
+                    if self.results:
+                        writer = csv.DictWriter(f, fieldnames=self.results[0].keys())
+                        writer.writeheader()
+                        writer.writerows(self.results)
+                return str(filename)
+            elif format == 'json':
+                filename = Config.RESULTS_DIR / f"results_{timestamp}.json"
+                with open(filename, 'w') as f:
+                    json.dump(self.results, f, indent=2)
+                return str(filename)
+        except Exception as e:
+            logger.error(f"Failed to export results: {e}")
+            return ""
+
+class DataCleaner:
+    @staticmethod
+    def clean_text(text: str) -> str:
+        if not text:
+            return ""
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        return text
+    
+    @staticmethod
+    def normalize_phone(phone: str, country_code: str) -> str:
+        try:
+            if not phone.startswith('+'):
+                phone = f"+{phone}"
+            parsed = phonenumbers.parse(phone, country_code)
+            if phonenumbers.is_valid_number(parsed):
+                return phonenumbers.format_number(
+                    parsed,
+                    phonenumbers.PhoneNumberFormat.INTERNATIONAL
+                )
+        except Exception as e:
+            logger.debug(f"Phone normalization failed: {e}")
+        return phone
+    
+    @staticmethod
+    def normalize_email(email: str) -> str:
+        return email.lower().strip()
+    
+    @staticmethod
+    def clean_company_name(name: str) -> str:
+        if not name:
+            return ""
+        suffixes = ['ltd', 'llc', 'inc', 'corp', 'corporation', 'co', 'company']
+        name = name.lower()
+        for suffix in suffixes:
+            name = re.sub(f"\\b{suffix}\\b", "", name)
+        name = re.sub(r'[^\w\s-]', '', name)
+        name = re.sub(r'\s+', ' ', name)
+        return name.strip().title()
+    
+    @staticmethod
+    def remove_duplicates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        cleaned = []
+        
+        for result in results:
+            key = (
+                DataCleaner.clean_company_name(result.get('Name', '')),
+                DataCleaner.normalize_email(result.get('Email', '')),
+                DataCleaner.normalize_phone(result.get('Phone', ''), 'US')
+            )
+            if key not in seen and any(k for k in key):
+                seen.add(key)
+                cleaned.append(result)
+        return cleaned
 
 class MonitoringSystem:
     def __init__(self):
@@ -261,7 +294,7 @@ class MonitoringSystem:
                 'error_count': len(self.error_log)
             }
 
-# Performance Optimization and Validation
+# Performance Optimization and Validation Classes
 class PerformanceOptimizer:
     def __init__(self):
         self.request_times = []
@@ -377,257 +410,189 @@ class DataValidator:
             score += 0.2
         return score
 
-class MetricsCollector:
+# Request Handling and Scraping Functions
+class RequestManager:
     def __init__(self):
-        self.metrics = {
-            'requests': {
-                'total': 0,
-                'successful': 0,
-                'failed': 0,
-                'timeouts': 0
-            },
-            'data': {
-                'total_results': 0,
-                'valid_emails': 0,
-                'valid_phones': 0,
-                'valid_companies': 0
-            },
-            'performance': {
-                'total_time': 0,
-                'avg_request_time': 0,
-                'avg_processing_time': 0
-            },
-            'validation': {
-                'high_confidence': 0,
-                'medium_confidence': 0,
-                'low_confidence': 0
-            }
+        self.ua = UserAgent()
+        self.session = requests.Session()
+        self.request_count = 0
+    
+    def get_headers(self) -> Dict[str, str]:
+        self.request_count += 1
+        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
+            self.ua = UserAgent()
+        
+        return {
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
         }
-        self.lock = threading.Lock()
-    
-    def update_request_metrics(self, success: bool, timeout: bool = False):
-        with self.lock:
-            self.metrics['requests']['total'] += 1
-            if success:
-                self.metrics['requests']['successful'] += 1
-            else:
-                self.metrics['requests']['failed'] += 1
-            if timeout:
-                self.metrics['requests']['timeouts'] += 1
-    
-    def update_data_metrics(self, result: Dict[str, Any]):
-        with self.lock:
-            self.metrics['data']['total_results'] += 1
-            if DataValidator.validate_email(result.get('Email')):
-                self.metrics['data']['valid_emails'] += 1
-            if DataValidator.validate_phone(result.get('Phone'), 'US'):
-                self.metrics['data']['valid_phones'] += 1
-            if DataValidator.validate_company_name(result.get('Name')):
-                self.metrics['data']['valid_companies'] += 1
-    
-    def update_validation_metrics(self, confidence_score: float):
-        with self.lock:
-            if confidence_score >= 0.8:
-                self.metrics['validation']['high_confidence'] += 1
-            elif confidence_score >= 0.5:
-                self.metrics['validation']['medium_confidence'] += 1
-            else:
-                self.metrics['validation']['low_confidence'] += 1
-    
-    def update_performance_metrics(self, request_time: float, processing_time: float):
-        with self.lock:
-            self.metrics['performance']['total_time'] += request_time + processing_time
-            self.metrics['performance']['avg_request_time'] = (
-                self.metrics['performance']['avg_request_time'] * 
-                (self.metrics['requests']['total'] - 1) +
-                request_time
-            ) / self.metrics['requests']['total']
-            self.metrics['performance']['avg_processing_time'] = (
-                self.metrics['performance']['avg_processing_time'] * 
-                (self.metrics['requests']['total'] - 1) +
-                processing_time
-            ) / self.metrics['requests']['total']
-
-# Initialize global instances
-data_manager = DataManager()
-monitoring_system = MonitoringSystem()
-performance_optimizer = PerformanceOptimizer()
-error_tracker = ErrorTracker()
-metrics_collector = MetricsCollector()
-
-# Enhanced scraping worker
-def scraping_worker(country: str, keywords: List[str]):
-    monitoring_system.start_session()
-    start_time = time.time()
-    
-    try:
-        # Load any existing interim results
-        if data_manager.load_interim():
-            logging.info(f"Resumed from {len(data_manager.results)} existing results")
-        
-        # Generate search queries
-        search_queries = generate_search_queries(country, keywords)
-        total_queries = len(search_queries)
-        
-        for query_index, query in enumerate(search_queries):
-            if not scraping_status['is_running']:
-                break
-            
-            query_start_time = time.time()
-            logging.info(f"Processing query {query_index + 1}/{total_queries}: {query}")
-            
-            try:
-                process_search_query(query, country)
-            except Exception as e:
-                error_tracker.record_error(e, f"Query: {query}")
-                continue
-            
-            # Save interim results periodically
-            if query_index % 5 == 0:
-                data_manager.save_interim()
-            
-            query_duration = time.time() - query_start_time
-            performance_optimizer.record_request_time(query_duration)
-        
-        # Final processing
-        results = DataCleaner.remove_duplicates(data_manager.results)
-        
-        # Validate and score results
-        validated_results = []
-        for result in results:
-            confidence_score = DataValidator.calculate_confidence_score(result)
-            result['confidence_score'] = confidence_score
-            metrics_collector.update_validation_metrics(confidence_score)
-            if confidence_score >= 0.5:  # Only keep medium and high confidence results
-                validated_results.append(result)
-        
-        # Export results
-        data_manager.results = validated_results
-        data_manager.export_results('csv')
-        data_manager.export_results('json')
-        
-    except Exception as e:
-        error_tracker.record_error(e, "Main scraping process")
-        logging.error(f"Scraping error: {str(e)}")
-    finally:
-        monitoring_system.end_session()
-        total_duration = time.time() - start_time
-        performance_optimizer.record_extraction_time(total_duration)
-
-# Request handling and data extraction functions
-class RequestHandler:
-    def __init__(self, country_code: str):
-        self.country_code = country_code
-        self.request_manager = RequestManager()
-        self.total_requests = 0
-        self.successful_requests = 0
     
     @retry(
         stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=4, max=10)
     )
-    def make_request(self, url: str) -> Optional[BeautifulSoup]:
+    def make_request(self, url: str, method: str = 'get', **kwargs) -> requests.Response:
         try:
-            start_time = time.time()
-            self.total_requests += 1
+            kwargs.update({
+                'headers': self.get_headers(),
+                'timeout': Config.REQUEST_TIMEOUT,
+                'verify': True
+            })
             
-            response = self.request_manager.make_request(url)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
             
-            duration = time.time() - start_time
-            performance_optimizer.record_request_time(duration)
-            metrics_collector.update_request_metrics(True)
-            self.successful_requests += 1
+            time.sleep(Config.RATE_LIMIT_DELAY)
             
-            return soup
-        
+            return response
+            
         except Exception as e:
-            error_tracker.record_error(e, f"URL: {url}")
-            metrics_collector.update_request_metrics(False, isinstance(e, requests.Timeout))
+            logger.error(f"Request failed for {url}: {str(e)}")
             raise
 
-def process_search_query(query: str, country: str):
-    request_handler = RequestHandler(country)
+def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
+    """Generate search queries combining keywords"""
+    queries = []
     
-    for page in range(1, 4):  # Search first 3 pages
-        if not scraping_status['is_running']:
-            break
-        
-        start_time = time.time()
-        try:
-            urls = get_google_search_results(query, page)
-            for url in urls:
-                if url in data_manager.processed_urls:
-                    continue
-                
-                result = process_single_url(url, country, request_handler)
-                if result:
-                    data_manager.results.append(result)
-                    data_manager.processed_urls.add(url)
-                    metrics_collector.update_data_metrics(result)
-        
-        except Exception as e:
-            error_tracker.record_error(e, f"Query: {query}, Page: {page}")
-        
-        duration = time.time() - start_time
-        performance_optimizer.record_extraction_time(duration)
-        time.sleep(Config.RATE_LIMIT_DELAY)
+    if not keywords:
+        for industry, business in itertools.product(
+            Keywords.INDUSTRY_KEYWORDS, 
+            Keywords.BUSINESS_KEYWORDS
+        ):
+            queries.append(f"{industry} {business} in {country}")
+    else:
+        for keyword in keywords:
+            if keyword.strip():
+                queries.append(f"{keyword.strip()} in {country}")
+    
+    return queries
 
-def process_single_url(url: str, country: str, request_handler: RequestHandler) -> Optional[Dict[str, Any]]:
+def extract_contact_details(soup: BeautifulSoup, url: str, country: str) -> Optional[Dict[str, Any]]:
+    """Extract contact information from webpage"""
     try:
-        soup = request_handler.make_request(url)
-        if not soup:
-            return None
+        # Extract title/company name
+        title = soup.title.string if soup.title else 'N/A'
         
-        result = extract_contact_details(soup, url, country)
-        if result:
-            confidence_score = DataValidator.calculate_confidence_score(result)
-            result['confidence_score'] = confidence_score
-            metrics_collector.update_validation_metrics(confidence_score)
-            
-            if confidence_score >= 0.5:
-                return result
+        # Extract emails
+        emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-.]+', str(soup))
+        email = next((e for e in emails if DataValidator.validate_email(e)), 'N/A')
         
-        return None
-    
+        # Extract phones
+        phones = re.findall(r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]', str(soup))
+        phone = next((p for p in phones if DataValidator.validate_phone(p, country)), 'N/A')
+        
+        # Extract address (basic implementation)
+        address = 'N/A'
+        address_patterns = [
+            r'\d+\s+[A-Za-z0-9\s,.-]+(?:Road|Rd|Street|St|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr)\b',
+            r'[A-Za-z0-9\s]+(?:Business Park|Industrial Estate|Technology Park|Office Park|Center|Centre)'
+        ]
+        for pattern in address_patterns:
+            matches = re.findall(pattern, str(soup), re.IGNORECASE)
+            if matches:
+                address = matches[0]
+                break
+        
+        return {
+            'Name': DataCleaner.clean_company_name(title),
+            'Email': email,
+            'Phone': phone,
+            'Address': address,
+            'Website': url
+        }
+        
     except Exception as e:
-        error_tracker.record_error(e, f"URL Processing: {url}")
+        logger.error(f"Failed to extract details from {url}: {str(e)}")
         return None
 
-# Flask routes and API endpoints
+# Flask Routes and API Endpoints
+@app.before_first_request
+def initialize_app():
+    try:
+        Config.initialize_directories()
+        global_state.initialize()
+        logger.info("Application initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize application: {e}\n{traceback.format_exc()}")
+        raise
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
+    if isinstance(e, HTTPException):
+        return e
+    
+    error_details = {
+        'error': str(e),
+        'type': e.__class__.__name__,
+        'trace_id': datetime.now().strftime('%Y%m%d%H%M%S')
+    }
+    
+    if app.debug:
+        error_details['traceback'] = traceback.format_exc()
+    
+    return jsonify(error_details), 500
+
+@app.route('/health')
+def health_check():
+    try:
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'scraping_status': global_state.scraping_status['current_status'],
+            'data_dir_exists': Config.DATA_DIR.exists(),
+            'results_dir_exists': Config.RESULTS_DIR.exists(),
+            'interim_dir_exists': Config.INTERIM_DIR.exists()
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+
 @app.route('/')
 def home():
-    return render_template('index.html',
-                         industry_keywords=INDUSTRY_KEYWORDS,
-                         business_keywords=BUSINESS_KEYWORDS)
+    try:
+        return render_template('index.html',
+                             industry_keywords=Keywords.INDUSTRY_KEYWORDS,
+                             business_keywords=Keywords.BUSINESS_KEYWORDS)
+    except Exception as e:
+        logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/start_scraping', methods=['POST'])
 def start_scraping():
     try:
         data = request.json
-        country = data.get('country')
-        keywords = data.get('keywords', '').split('\n')
+        if not data:
+            logger.error("No JSON data received")
+            return jsonify({'error': 'No data received'}), 400
         
+        logger.debug(f"Received data: {data}")
+        
+        country = data.get('country')
         if not country:
             return jsonify({'error': 'Missing country'}), 400
         
-        # Validate country code
-        country = country.upper()
-        if not re.match(r'^[A-Z]{2}$', country):
-            return jsonify({'error': 'Invalid country code format'}), 400
+        keywords = data.get('keywords', '')
+        if isinstance(keywords, str):
+            keywords = [k.strip() for k in keywords.split('\n') if k.strip()]
+        elif not isinstance(keywords, list):
+            keywords = []
         
         # Reset status and start new scraping session
-        global scraping_status
-        scraping_status = {
+        global_state.scraping_status.update({
             'is_running': True,
             'progress': 0,
             'total': 0,
             'current_status': 'Starting...',
             'results': [],
             'errors': []
-        }
+        })
         
-        # Start scraping in background thread
+        # Start scraping thread
         thread = threading.Thread(
             target=scraping_worker,
             args=(country, keywords)
@@ -635,37 +600,48 @@ def start_scraping():
         thread.daemon = True
         thread.start()
         
+        logger.info(f"Scraping started for country: {country} with {len(keywords)} keywords")
         return jsonify({'message': 'Scraping started successfully'})
-    
+        
     except Exception as e:
-        error_tracker.record_error(e, "Start scraping endpoint")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error in start_scraping: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({
+            'error': str(e),
+            'type': e.__class__.__name__
+        }), 500
 
 @app.route('/stop_scraping', methods=['POST'])
 def stop_scraping():
-    global scraping_status
-    scraping_status['is_running'] = False
-    return jsonify({'message': 'Scraping stopped'})
+    try:
+        global_state.scraping_status['is_running'] = False
+        return jsonify({'message': 'Scraping stopped'})
+    except Exception as e:
+        logger.error(f"Error stopping scraping: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/status')
 def get_status():
-    return jsonify({
-        **scraping_status,
-        'metrics': metrics_collector.metrics,
-        'performance': performance_optimizer.get_performance_metrics(),
-        'errors': error_tracker.get_error_summary()
-    })
+    try:
+        return jsonify({
+            **global_state.scraping_status,
+            'metrics': global_state.metrics_collector.metrics if global_state.metrics_collector else {},
+            'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
+            'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {}
+        })
+    except Exception as e:
+        logger.error(f"Error getting status: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/download/<format>')
 def download_results(format):
-    if format not in ['csv', 'json']:
-        return jsonify({'error': 'Invalid format'}), 400
-    
-    if not data_manager.results:
-        return jsonify({'error': 'No results available'}), 404
-    
     try:
-        filename = data_manager.export_results(format)
+        if format not in ['csv', 'json']:
+            return jsonify({'error': 'Invalid format'}), 400
+        
+        if not global_state.data_manager or not global_state.data_manager.results:
+            return jsonify({'error': 'No results available'}), 404
+        
+        filename = global_state.data_manager.export_results(format)
         if not filename:
             return jsonify({'error': 'Export failed'}), 500
         
@@ -674,28 +650,50 @@ def download_results(format):
             as_attachment=True,
             download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}'
         )
-    
     except Exception as e:
-        error_tracker.record_error(e, f"Download {format} endpoint")
+        logger.error(f"Error downloading results: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/metrics')
 def get_metrics():
-    return jsonify({
-        'monitoring': monitoring_system.get_metrics(),
-        'performance': performance_optimizer.get_performance_metrics(),
-        'errors': error_tracker.get_error_summary(),
-        'data': metrics_collector.metrics
-    })
+    try:
+        return jsonify({
+            'monitoring': global_state.monitoring_system.get_metrics() if global_state.monitoring_system else {},
+            'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
+            'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {},
+            'data': global_state.metrics_collector.metrics if global_state.metrics_collector else {}
+        })
+    except Exception as e:
+        logger.error(f"Error getting metrics: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/errors')
 def get_errors():
-    category = request.args.get('category', 'all')
-    if category == 'all':
-        return jsonify(error_tracker.errors)
-    return jsonify(error_tracker.errors.get(category, []))
+    try:
+        category = request.args.get('category', 'all')
+        if not global_state.error_tracker:
+            return jsonify({'error': 'Error tracker not initialized'}), 500
+        
+        if category == 'all':
+            return jsonify(global_state.error_tracker.errors)
+        return jsonify(global_state.error_tracker.errors.get(category, []))
+    except Exception as e:
+        logger.error(f"Error getting errors: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Main entry point
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        # Ensure directories exist
+        Config.initialize_directories()
+        
+        # Initialize global state
+        global_state.initialize()
+        
+        # Start the application
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
+        
+    except Exception as e:
+        logger.critical(f"Failed to start application: {str(e)}\n{traceback.format_exc()}")
+        sys.exit(1)
