@@ -495,49 +495,53 @@ class MetricsCollector:
         with self.lock:
             self.metrics.update(new_metrics)
 
-class SearchEngine:
-    def __init__(self):
-        self.session = requests.Session()
-        self.user_agent = UserAgent()
-    
-    def search(self, query: str, country_code: str) -> List[str]:
-        try:
-            headers = {
-                'User-Agent': self.user_agent.random,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            }
-            
-            # Example using DuckDuckGo (you can modify for other search engines)
-            params = {
-                'q': query,
-                'kl': f'region:{country_code}',
-                'format': 'json'
-            }
-            
-            response = self.session.get(
-                'https://api.duckduckgo.com/',
-                params=params,
-                headers=headers,
-                timeout=10
-            )
-            
-            # Process results (modify according to the search engine's response format)
-            if response.status_code == 200:
-                results = response.json()
-                return [result['url'] for result in results.get('Results', [])]
-            
-            return []
-                
-        except Exception as e:
-            logger.error(f"Search failed: {str(e)}")
-            return []
+# The SearchEngine class is already defined above
 
-# Data Manager and other classes remain unchanged...
+# Request Manager Class (assuming it's defined elsewhere or needs to be added)
+class RequestManager:
+    def __init__(self):
+        self.ua = UserAgent()
+        self.session = requests.Session()
+        self.request_count = 0
+    
+    def get_headers(self) -> Dict[str, str]:
+        self.request_count += 1
+        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
+            self.ua = UserAgent()
+        
+        return {
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+    
+    @retry(
+        stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    def make_request(self, url: str, method: str = 'get', **kwargs) -> Optional[requests.Response]:
+        try:
+            kwargs.update({
+                'headers': self.get_headers(),
+                'timeout': Config.REQUEST_TIMEOUT,
+                'verify': True,
+                'allow_redirects': True
+            })
+            
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            
+            time.sleep(random.uniform(1.0, 2.0))
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Request failed for {url}: {str(e)}")
+            raise  # To trigger retry
 
 # Error Handler
 @app.errorhandler(Exception)
@@ -573,6 +577,20 @@ def home():
     except Exception as e:
         logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
+
+# Define the generate_search_queries function
+def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
+    """
+    Generate a list of search queries based on the selected country and keywords.
+    If no keywords are provided, use default industry and business keyword combinations.
+    """
+    if not keywords:
+        # Generate combinations of industry and business keywords
+        keywords = [f"{industry} {business}" for industry in Keywords.INDUSTRY_KEYWORDS for business in Keywords.BUSINESS_KEYWORDS]
+    
+    # Optionally, incorporate the country into the search queries
+    queries = [f"{keyword} {country}" for keyword in keywords]
+    return queries
 
 # Scraping Worker Function
 def scraping_worker(country: str, keywords: List[str] = None):
@@ -613,6 +631,8 @@ def scraping_worker(country: str, keywords: List[str] = None):
                         
                         if response and response.status_code == 200:
                             # Process results...
+                            # Placeholder for actual scraping logic
+                            logger.debug(f"Successfully fetched data from {search_domain}")
                             time.sleep(random.uniform(2.0, 4.0))
                             break  # Successfully got results, move to next query
                         
