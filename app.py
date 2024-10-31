@@ -9,6 +9,18 @@ import phonenumbers
 import logging
 from urllib.parse import urlparse
 import datetime
+import nltk
+from nltk import sent_tokenize
+from nltk.corpus import stopwords
+import spacy
+
+# Download necessary NLTK data
+nltk.download('punkt')
+nltk.download('stopwords')
+
+# Load spaCy model for advanced NLP (make sure to install it first)
+# You may need to run: python -m spacy download en_core_web_sm
+nlp = spacy.load('en_core_web_sm')
 
 # Configure logging
 logging.basicConfig(filename='scraper.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
@@ -29,7 +41,7 @@ def is_valid_email(email):
 # Function to validate phone numbers
 def is_valid_phone(phone, country_code):
     try:
-        parsed_number = phonenumbers.parse(phone, country_code)
+        parsed_number = phonenumbers.parse(phone, country_code.upper())
         return phonenumbers.is_valid_number(parsed_number)
     except phonenumbers.NumberParseException:
         return False
@@ -62,14 +74,14 @@ def can_crawl(url, user_agent='*'):
         return True  # If robots.txt can't be reached, proceed cautiously
 
 # Function to extract contact details from a website
-def extract_contact_details(url, country_code):
+def extract_contact_details(url, country_code, proxies=None):
     headers = {'User-Agent': 'Mozilla/5.0 (compatible; YourScriptName/1.0)'}
     try:
         if not can_crawl(url):
             log(f"Skipping {url} due to robots.txt restrictions.")
             return None
 
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10, proxies=proxies)
         response.raise_for_status()
 
         # Parse the HTML content
@@ -81,24 +93,26 @@ def extract_contact_details(url, country_code):
         phone = 'N/A'
         address = 'N/A'
 
-        # Search for email addresses
-        emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', soup.get_text())
-        for email_candidate in emails_found:
-            if is_valid_email(email_candidate):
-                email = email_candidate
-                break
+        # Extract emails
+        emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', response.text)
+        valid_emails = [e for e in emails_found if is_valid_email(e)]
+        email = valid_emails[0] if valid_emails else 'N/A'
 
-        # Search for phone numbers
-        phones_found = re.findall(r'\+?\d[\d\s\-().]{7,}', soup.get_text())
+        # Extract phone numbers
+        phones_found = re.findall(r'\+?\d[\d\s\-().]{7,}', response.text)
         for phone_candidate in phones_found:
             phone_clean = re.sub(r'[^\d+]', '', phone_candidate)
             if is_valid_phone(phone_clean, country_code):
                 phone = phone_clean
                 break
 
-        # Address extraction is complex; requires advanced parsing
-        # For simplicity, we can look for common address patterns or keywords
-        # Here we leave it as 'N/A' unless specific patterns are identified
+        # Advanced address extraction using spaCy
+        doc = nlp(response.text)
+        addresses = []
+        for ent in doc.ents:
+            if ent.label_ == 'GPE' or ent.label_ == 'LOC':
+                addresses.append(ent.text)
+        address = addresses[0] if addresses else 'N/A'
 
         return {
             'Name': name,
@@ -112,7 +126,7 @@ def extract_contact_details(url, country_code):
         return None
 
 # Function to perform Google Custom Search
-def google_search(query, start_index, api_key, search_engine_id):
+def google_search(query, start_index, api_key, search_engine_id, proxies=None):
     url = 'https://www.googleapis.com/customsearch/v1'
     params = {
         'key': api_key,
@@ -121,7 +135,7 @@ def google_search(query, start_index, api_key, search_engine_id):
         'start': start_index  # Start index for pagination
     }
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, proxies=proxies)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -129,7 +143,7 @@ def google_search(query, start_index, api_key, search_engine_id):
         return None
 
 # Main scraping function
-def main(api_key, search_engine_id, country, keywords_list):
+def main(api_key, search_engine_id, country, keywords_list, proxies=None):
     global stop_scraping
     stop_scraping = False
     all_companies = []
@@ -150,7 +164,7 @@ def main(api_key, search_engine_id, country, keywords_list):
             if stop_scraping:
                 break
             query = f"{keyword} in {country}"
-            search_results = google_search(query, start_index, api_key, search_engine_id)
+            search_results = google_search(query, start_index, api_key, search_engine_id, proxies)
             if not search_results:
                 break
             web_pages = search_results.get('items', [])
@@ -162,7 +176,7 @@ def main(api_key, search_engine_id, country, keywords_list):
                 if stop_scraping:
                     break
                 log(f"Visiting: {company_url}")
-                company_details = extract_contact_details(company_url, country_code=country)
+                company_details = extract_contact_details(company_url, country_code=country, proxies=proxies)
                 if company_details:
                     all_companies.append(company_details)
                     # Save incrementally
@@ -204,6 +218,14 @@ def get_table_download_link(df):
     href = f'<a href="data:file/csv;base64,{b64}" download="beverage_companies.csv">Download CSV File</a>'
     return href
 
+# Function to generate combined keywords
+def generate_combined_keywords(industry_keywords, business_keywords):
+    combined_keywords = []
+    for industry in industry_keywords:
+        for business in business_keywords:
+            combined_keywords.append(f"{industry} {business}")
+    return combined_keywords
+
 # Streamlit UI
 def run_app():
     st.title("Beverage Distributors Scraper")
@@ -215,30 +237,83 @@ def run_app():
     - Enter the country name.
     - Modify the default keywords if necessary.
     - Enter your Google Custom Search API key and Search Engine ID.
+    - Optional: Enter proxy settings if required.
     - Click **Start Scraping** to begin.
     """)
 
     # Input fields
-    country = st.text_input("Country:")
+    country = st.text_input("Country (ISO country code, e.g., 'US', 'GB'):")
 
-    # Default keywords
-    default_keywords = """
-Non-Alcoholic Beverage Distributor
-Soft Drink Wholesaler
-Juice Supplier
-Energy Drink Trader
-Bottled Water Dealer
-Functional Beverage Reseller
-Herbal Drink Importer
-Smoothie Stockist
-Plant-Based Beverage Merchant
-Kombucha Exporter
-""".strip()
+    # Default industry and business keywords
+    industry_keywords = [
+        'Non-Alcoholic Beverages',
+        'Soft Drinks',
+        'Beverages',
+        'Juices',
+        'Mineral Water',
+        'Bottled Water',
+        'Energy Drinks',
+        'Sports Drinks',
+        'Carbonated Drinks',
+        'Flavored Water',
+        'Herbal Drinks',
+        'Functional Beverages',
+        'Dairy Beverages',
+        'Plant-Based Beverages',
+        'Smoothies',
+        'Iced Tea',
+        'Ready-to-Drink Coffee',
+        'Mocktails',
+        'Kombucha',
+        'Vitamin Water'
+    ]
 
-    keywords_input = st.text_area("Keywords (one per line):", value=default_keywords, height=200)
+    business_keywords = [
+        'Distributor',
+        'Wholesaler',
+        'Supplier',
+        'Trader',
+        'Dealer',
+        'Reseller',
+        'Stockist',
+        'Merchant',
+        'Importer',
+        'Exporter',
+        'Agency',
+        'Broker',
+        'Trading Company',
+        'Bulk Supplier',
+        'B2B Supplier',
+        'Distribution Company',
+        'Wholesale Distributor',
+        'Supply Chain',
+        'Logistics Provider',
+        'Beverage Services',
+        'Retail Supplier',
+        'Beverage Network',
+        'Commercial Supplier',
+        'Wholesale Market'
+    ]
+
+    # Generate combined keywords
+    default_keywords_list = generate_combined_keywords(industry_keywords, business_keywords)
+    default_keywords = '\n'.join(default_keywords_list)
+
+    keywords_input = st.text_area("Keywords (one per line):", value=default_keywords, height=300)
 
     api_key = st.text_input("Google API Key:", type="password")
     search_engine_id = st.text_input("Search Engine ID (cx):")
+
+    # Optional proxy settings
+    use_proxy = st.checkbox("Use Proxy")
+    proxies = None
+    if use_proxy:
+        proxy_input = st.text_input("Enter proxy URL (e.g., http://username:password@proxyserver:port):")
+        if proxy_input:
+            proxies = {
+                'http': proxy_input,
+                'https': proxy_input
+            }
 
     # Start and Stop buttons
     start_button = st.button("Start Scraping")
@@ -250,7 +325,7 @@ Kombucha Exporter
         else:
             keywords_list = [k.strip() for k in keywords_input.split('\n') if k.strip()]
             # Start scraping in a new thread
-            threading.Thread(target=main, args=(api_key, search_engine_id, country, keywords_list)).start()
+            threading.Thread(target=main, args=(api_key, search_engine_id, country, keywords_list, proxies)).start()
 
     if stop_button:
         global stop_scraping
