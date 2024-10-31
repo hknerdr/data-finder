@@ -1,0 +1,23 @@
+{
+  "proxies": [
+    {
+      "protocol": "socks5",
+      "host": "proxy1.example.com",
+      "port": 1080,
+      "username": "user1",
+      "password": "pass1"
+    },
+    {
+      "protocol": "http",
+      "host": "proxy2.example.com",
+      "port": 8080,
+      "username": "user2",
+      "password": "pass2"
+    }
+  ],
+  "settings": {
+    "rotation_interval": 5,
+    "max_failures": 3,
+    "timeout": 30
+  }
+}

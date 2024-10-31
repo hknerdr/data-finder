@@ -12,6 +12,9 @@
         #status {
             min-height: 50px;
         }
+        .keyword-section {
+            margin-bottom: 20px;
+        }
     </style>
 </head>
 <body>
@@ -21,23 +24,15 @@
         <div class="row">
             <div class="col-md-6">
                 <div class="mb-3">
-                    <label for="apiKey" class="form-label">Google API Key</label>
-                    <input type="password" class="form-control" id="apiKey" required>
-                </div>
-                
-                <div class="mb-3">
-                    <label for="searchEngineId" class="form-label">Search Engine ID</label>
-                    <input type="text" class="form-control" id="searchEngineId" required>
-                </div>
-                
-                <div class="mb-3">
                     <label for="country" class="form-label">Country Code (e.g., US, GB)</label>
                     <input type="text" class="form-control" id="country" required>
                 </div>
                 
                 <div class="mb-3">
                     <label for="keywords" class="form-label">Keywords (one per line)</label>
-                    <textarea class="form-control" id="keywords" rows="10" required></textarea>
+                    <small class="form-text text-muted d-block mb-2">Leave empty to use default combinations</small>
+                    <textarea class="form-control" id="keywords" rows="15">{% for industry in industry_keywords %}{% for business in business_keywords %}{{ industry }} {{ business }}
+{% endfor %}{% endfor %}</textarea>
                 </div>
                 
                 <button id="startButton" class="btn btn-primary">Start Scraping</button>
@@ -75,55 +70,4 @@
                     document.getElementById('status').textContent = data.current_status;
                     
                     if (data.results.length > 0) {
-                        document.getElementById('downloadSection').style.display = 'block';
-                    }
-                    
-                    if (isRunning) {
-                        setTimeout(updateStatus, 1000);
-                    }
-                });
-        }
-
-        document.getElementById('startButton').addEventListener('click', () => {
-            const data = {
-                api_key: document.getElementById('apiKey').value,
-                search_engine_id: document.getElementById('searchEngineId').value,
-                country: document.getElementById('country').value,
-                keywords: document.getElementById('keywords').value
-            };
-            
-            if (!data.api_key || !data.search_engine_id || !data.country || !data.keywords) {
-                alert('Please fill in all fields');
-                return;
-            }
-            
-            fetch('/start_scraping', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(data)
-            })
-            .then(response => response.json())
-            .then(data => {
-                isRunning = true;
-                document.getElementById('startButton').disabled = true;
-                document.getElementById('stopButton').disabled = false;
-                updateStatus();
-            });
-        });
-
-        document.getElementById('stopButton').addEventListener('click', () => {
-            fetch('/stop_scraping', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                isRunning = false;
-                document.getElementById('startButton').disabled = false;
-                document.getElementById('stopButton').disabled = true;
-            });
-        });
-    </script>
-</body>
-</html>
+                        document.getElementById('downloadSection').style.display =

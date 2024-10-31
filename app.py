@@ -1,237 +1,212 @@
-from flask import Flask, render_template, request, jsonify, send_file
-import requests
-from bs4 import BeautifulSoup
-import pandas as pd
-import threading
-import time
-import re
-import phonenumbers
-import logging
-from urllib.parse import urlparse
-import datetime
-import nltk
-from nltk.tokenize import sent_tokenize
+# Add these imports to the existing ones
 import json
-import io
-import os
+from pathlib import Path
+from typing import Dict, List, Optional
+import urllib3
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
-app = Flask(__name__)
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
-
-# Download necessary NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-except Exception as e:
-    logging.warning(f"NLTK data download failed. Some features might be limited. Error: {str(e)}")
-
-# Global variables to store scraping state
-scraping_status = {
-    'is_running': False,
-    'progress': 0,
-    'total': 0,
-    'current_status': '',
-    'results': []
-}
-
-def is_valid_email(email):
-    regex = r'^[a-z0-9]+[\._]?[a-z0-9]+[@]\w+[.]\w+$'
-    return re.match(regex, email, re.IGNORECASE) is not None
-
-def is_valid_phone(phone, country_code):
-    try:
-        parsed_number = phonenumbers.parse(phone, country_code.upper())
-        return phonenumbers.is_valid_number(parsed_number)
-    except phonenumbers.NumberParseException:
-        return False
-
-def extract_address(text):
-    address_patterns = [
-        r'\d+\s+[A-Za-z0-9\s,.-]+(?:Road|Rd|Street|St|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr)\b',
-        r'P\.?O\.?\s*Box\s+\d+',
-        r'[A-Za-z0-9\s]+(?:Business Park|Industrial Estate|Technology Park|Office Park|Center|Centre)',
-        r'[A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?'
-    ]
+@dataclass
+class ProxyConfig:
+    protocol: str
+    host: str
+    port: int
+    username: Optional[str] = None
+    password: Optional[str] = None
     
-    for pattern in address_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        if matches:
-            return max(matches, key=len)
+    def get_url(self) -> str:
+        auth = f"{self.username}:{self.password}@" if self.username and self.password else ""
+        return f"{self.protocol}://{auth}{self.host}:{self.port}"
     
-    try:
-        sentences = sent_tokenize(text)
-        for sentence in sentences:
-            if any(word.isdigit() for word in sentence.split()) and \
-               any(word in sentence for word in ['Street', 'Road', 'Avenue', 'Suite', 'Floor']):
-                return sentence.strip()
-    except Exception:
-        pass
-    
-    return 'N/A'
+    def to_dict(self) -> Dict[str, str]:
+        url = self.get_url()
+        return {
+            'http': url,
+            'https': url
+        }
 
-def extract_contact_details(url, country_code):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; ContactInfoBot/1.0)',
-        'Accept': 'text/html,application/xhtml+xml'
-    }
+class ProxyConfigManager:
+    def __init__(self, config_path: str = "config/proxy_config.json"):
+        self.config_path = Path(config_path)
+        self.proxies: List[ProxyConfig] = []
+        self.settings: Dict = {}
+        self.last_load_time = None
+        self.load_config()
     
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+    def load_config(self) -> None:
+        try:
+            if not self.config_path.exists():
+                self.create_default_config()
+            
+            with open(self.config_path, 'r') as f:
+                config_data = json.load(f)
+            
+            self.proxies = [
+                ProxyConfig(**proxy_data)
+                for proxy_data in config_data.get('proxies', [])
+            ]
+            self.settings = config_data.get('settings', {})
+            self.last_load_time = datetime.now()
+            
+            logging.info(f"Loaded {len(self.proxies)} proxies from configuration")
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        except Exception as e:
+            logging.error(f"Error loading proxy configuration: {str(e)}")
+            self.proxies = []
+            self.settings = {}
+    
+    def create_default_config(self) -> None:
+        default_config = {
+            "proxies": [],
+            "settings": {
+                "rotation_interval": 5,
+                "max_failures": 3,
+                "timeout": 30
+            }
+        }
         
-        # Extract title/name
-        name = soup.title.string if soup.title else 'N/A'
+        self.config_path.parent.mkdir(exist_ok=True)
+        with open(self.config_path, 'w') as f:
+            json.dump(default_config, f, indent=2)
+    
+    def get_all_proxies(self) -> List[Dict[str, str]]:
+        if not self.proxies:
+            return []
         
-        # Extract emails
-        emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', response.text)
-        email = next((e for e in emails if is_valid_email(e)), 'N/A')
+        return [proxy.to_dict() for proxy in self.proxies]
+    
+    def validate_proxy(self, proxy: ProxyConfig) -> bool:
+        try:
+            test_url = "https://www.google.com"
+            with requests.Session() as session:
+                response = session.get(
+                    test_url,
+                    proxies=proxy.to_dict(),
+                    timeout=self.settings.get('timeout', 30)
+                )
+                return response.status_code == 200
+        except Exception as e:
+            logging.warning(f"Proxy validation failed for {proxy.host}: {str(e)}")
+            return False
+
+class EnhancedProxyManager(ProxyManager):
+    def __init__(self):
+        super().__init__()
+        self.config_manager = ProxyConfigManager()
+        self.proxy_failures: Dict[str, int] = {}
+        self.last_rotation = datetime.now()
+    
+    def get_proxy(self) -> Optional[Dict[str, str]]:
+        # Reload config periodically
+        if (datetime.now() - self.config_manager.last_load_time) > timedelta(minutes=5):
+            self.config_manager.load_config()
         
-        # Extract phones
-        phones = re.findall(r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]', response.text)
-        phone = 'N/A'
-        for p in phones:
-            clean_phone = re.sub(r'[\s\(\)\-\.]', '', p)
-            if not clean_phone.startswith('+'):
-                clean_phone = '+' + clean_phone
-            if is_valid_phone(clean_phone, country_code):
-                phone = clean_phone
-                break
+        # Check if it's time to rotate
+        if (datetime.now() - self.last_rotation).seconds > self.config_manager.settings.get('rotation_interval', 300):
+            self.current_proxy = None
+            self.last_rotation = datetime.now()
         
-        # Extract address
-        address = extract_address(response.text)
+        if not self.current_proxy:
+            available_proxies = [
+                proxy for proxy in self.config_manager.get_all_proxies()
+                if self.proxy_failures.get(str(proxy), 0) < self.config_manager.settings.get('max_failures', 3)
+            ]
+            
+            if available_proxies:
+                self.current_proxy = random.choice(available_proxies)
+            else:
+                self.proxy_failures.clear()
+                return None
+        
+        return self.current_proxy
+    
+    def mark_proxy_failed(self, proxy: Dict[str, str]) -> None:
+        proxy_key = str(proxy)
+        self.proxy_failures[proxy_key] = self.proxy_failures.get(proxy_key, 0) + 1
+        if self.proxy_failures[proxy_key] >= self.config_manager.settings.get('max_failures', 3):
+            logging.warning(f"Proxy {proxy_key} exceeded maximum failures")
+            self.current_proxy = None
+
+# Update the RequestManager to use EnhancedProxyManager
+class RequestManager:
+    def __init__(self):
+        self.ua = UserAgent()
+        self.proxy_manager = EnhancedProxyManager()
+        self.session = requests.Session()
+        self.request_count = 0
+    
+    def get_headers(self) -> Dict[str, str]:
+        self.request_count += 1
+        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
+            self.ua = UserAgent()
         
         return {
-            'Name': name,
-            'Email': email,
-            'Phone': phone,
-            'Address': address,
-            'Website': url
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
         }
-    except Exception as e:
-        logging.error(f"Failed to extract details from {url}: {e}")
-        return None
-
-def google_search(query, start_index, api_key, search_engine_id):
-    url = 'https://www.googleapis.com/customsearch/v1'
-    params = {
-        'key': api_key,
-        'cx': search_engine_id,
-        'q': query,
-        'start': start_index
-    }
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logging.error(f"Google search failed: {e}")
-        return None
-
-def scraping_worker(api_key, search_engine_id, country, keywords):
-    global scraping_status
-    scraping_status['results'] = []
-    scraping_status['is_running'] = True
-    scraping_status['progress'] = 0
     
-    try:
-        total_keywords = len(keywords)
-        scraping_status['total'] = total_keywords * 10  # Approximate number of results
-        
-        for keyword in keywords:
-            if not scraping_status['is_running']:
-                break
-                
-            query = f"{keyword} in {country}"
-            scraping_status['current_status'] = f"Searching for: {query}"
+    @retry(
+        stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    def make_request(self, url: str, method: str = 'get', **kwargs) -> requests.Response:
+        try:
+            proxy = self.proxy_manager.get_proxy()
+            kwargs.update({
+                'headers': self.get_headers(),
+                'timeout': Config.REQUEST_TIMEOUT,
+                'proxies': proxy,
+                'verify': True
+            })
             
-            for start_index in range(1, 11):  # Get first 10 pages
-                if not scraping_status['is_running']:
-                    break
-                    
-                search_results = google_search(query, start_index, api_key, search_engine_id)
-                if not search_results or 'items' not in search_results:
-                    continue
-                
-                for item in search_results['items']:
-                    if not scraping_status['is_running']:
-                        break
-                        
-                    url = item.get('link')
-                    if url:
-                        details = extract_contact_details(url, country)
-                        if details:
-                            scraping_status['results'].append(details)
-                            
-                    scraping_status['progress'] += 1
-                    
-                time.sleep(1)  # Be nice to the servers
-                
-    except Exception as e:
-        logging.error(f"Scraping error: {e}")
-    finally:
-        scraping_status['is_running'] = False
-        scraping_status['current_status'] = 'Completed'
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            
+            # Add delay to respect rate limits
+            time.sleep(Config.RATE_LIMIT_DELAY)
+            
+            return response
+            
+        except Exception as e:
+            if proxy:
+                self.proxy_manager.mark_proxy_failed(proxy)
+            raise
 
-@app.route('/')
-def home():
-    return render_template('index.html')
-
-@app.route('/start_scraping', methods=['POST'])
-def start_scraping():
-    data = request.json
-    api_key = data.get('api_key')
-    search_engine_id = data.get('search_engine_id')
-    country = data.get('country')
-    keywords = data.get('keywords', '').split('\n')
+def extract_phones(text: str, country_code: str) -> List[str]:
+    """Enhanced phone number extraction and validation"""
+    phones = set()
     
-    if not all([api_key, search_engine_id, country, keywords]):
-        return jsonify({'error': 'Missing required parameters'}), 400
+    # Common phone patterns
+    patterns = [
+        r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]',
+        r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b',
+        r'\b\d{10}\b',
+        r'\+\d{1,3}\s?\d{10}\b'
+    ]
     
-    # Stop any existing scraping
-    global scraping_status
-    scraping_status['is_running'] = False
-    time.sleep(1)  # Wait for previous thread to stop
+    for pattern in patterns:
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            phone = match.group()
+            clean_phone = re.sub(r'[\s\(\)\-\.]', '', phone)
+            
+            # Add country code if missing
+            if not clean_phone.startswith('+'):
+                clean_phone = f"+{country_code}{clean_phone}"
+            
+            try:
+                parsed_number = phonenumbers.parse(clean_phone)
+                if phonenumbers.is_valid_number(parsed_number):
+                    formatted_number = phonenumbers.format_number(
+                        parsed_number,
+                        phonenumbers.PhoneNumberFormat.INTERNATIONAL
+                    )
+                    phones.add(formatted_number)
+            except phonenumbers.NumberParseException:
+                continue
     
-    # Start new scraping thread
-    thread = threading.Thread(
-        target=scraping_worker,
-        args=(api_key, search_engine_id, country, keywords)
-    )
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({'message': 'Scraping started'})
-
-@app.route('/stop_scraping', methods=['POST'])
-def stop_scraping():
-    global scraping_status
-    scraping_status['is_running'] = False
-    return jsonify({'message': 'Scraping stopped'})
-
-@app.route('/status')
-def get_status():
-    return jsonify(scraping_status)
-
-@app.route('/download')
-def download_results():
-    if not scraping_status['results']:
-        return jsonify({'error': 'No results available'}), 404
-    
-    df = pd.DataFrame(scraping_status['results'])
-    output = io.BytesIO()
-    df.to_csv(output, index=False)
-    output.seek(0)
-    
-    return send_file(
-        output,
-        mimetype='text/csv',
-        as_attachment=True,
-        download_name='scraping_results.csv'
-    )
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    return list(phones)
