@@ -497,7 +497,7 @@ class MetricsCollector:
 
 # The SearchEngine class is already defined above
 
-# Request Manager Class (assuming it's defined elsewhere or needs to be added)
+# Request Manager Class
 class RequestManager:
     def __init__(self):
         self.ua = UserAgent()
@@ -631,23 +631,65 @@ def scraping_worker(country: str, keywords: List[str] = None):
                         
                         if response and response.status_code == 200:
                             # Process results...
-                            # Placeholder for actual scraping logic
-                            logger.debug(f"Successfully fetched data from {search_domain}")
+                            # Extract and parse the response content
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            
+                            # Example: Extract search result links
+                            results = []
+                            for link in soup.find_all('a', href=True):
+                                url = link['href']
+                                # Filter out irrelevant links
+                                if "http" in url:
+                                    results.append(url)
+                            
+                            # Store the results
+                            for url in results:
+                                if url not in global_state.scraping_status['results']:
+                                    global_state.scraping_status['results'].append({
+                                        'URL': url
+                                    })
+                            
+                            # Update progress
+                            global_state.monitoring_system.record_extraction(True)
+                            global_state.metrics_collector.update_metrics({
+                                'last_processed_query': query,
+                                'total_extracted_links': len(results)
+                            })
+                            
+                            logger.debug(f"Successfully fetched data from {search_domain}: {len(results)} links")
+                            
                             time.sleep(random.uniform(2.0, 4.0))
                             break  # Successfully got results, move to next query
                         
                     except Exception as e:
                         logger.error(f"Search failed for {search_domain}: {str(e)}")
+                        global_state.error_tracker.record_error(e, context=search_domain)
                         continue
                 
-                time.sleep(random.uniform(3.0, 5.0))  # Rate limiting
-                
+                # Rate limiting
+                time.sleep(random.uniform(3.0, 5.0))
+            
             except Exception as e:
                 logger.error(f"Error processing query: {str(e)}")
+                global_state.error_tracker.record_error(e, context=query)
                 time.sleep(random.uniform(5.0, 10.0))  # Longer delay on errors
                 continue
             
-        # Cleanup
+            # Save interim results periodically
+            if idx % 50 == 0:
+                global_state.data_manager.results = global_state.scraping_status['results']
+                global_state.data_manager.save_interim()
+        
+        # After all queries are processed
+        # Perform data cleaning and deduplication
+        cleaned_results = DataCleaner.remove_duplicates(global_state.scraping_status['results'])
+        global_state.scraping_status['results'] = cleaned_results
+        
+        # Save final results
+        global_state.data_manager.results = cleaned_results
+        global_state.data_manager.save_interim()
+        
+        # Update scraping status
         global_state.scraping_status.update({
             'is_running': False,
             'current_status': "Completed",
@@ -657,6 +699,7 @@ def scraping_worker(country: str, keywords: List[str] = None):
         
     except Exception as e:
         logger.error(f"Scraping worker failed: {str(e)}")
+        global_state.error_tracker.record_error(e, context="scraping_worker")
         global_state.scraping_status.update({
             'current_status': f"Failed: {str(e)}",
             'is_running': False
