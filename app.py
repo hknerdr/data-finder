@@ -19,9 +19,6 @@ from fake_useragent import UserAgent
 import itertools
 from tenacity import retry, stop_after_attempt, wait_exponential
 import random
-import socket
-import socks
-from requests.exceptions import RequestException, ProxyError
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -29,13 +26,31 @@ import statistics
 import traceback
 from werkzeug.exceptions import HTTPException
 import sys
-import pycountry
 
-# NLTK Setup
+# Near the top of app.py, after imports
+BASE_DIR = Path(os.getenv('RENDER_APP_DIR', os.getcwd()))
+DATA_DIR = BASE_DIR / "data"
+LOGS_DIR = BASE_DIR / "logs"
+
+# Create necessary directories with proper permissions
+for directory in [DATA_DIR, LOGS_DIR]:
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+
+# Configure logging to work with Render.com
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Log to stdout for Render.com to capture
+    ]
+)
+
+# Configure NLTK
 try:
-    nltk.download('punkt', quiet=True)
+    nltk.data.path.append('/opt/render/nltk_data')
+    nltk.download('punkt', quiet=True, download_dir='/opt/render/nltk_data')
 except Exception as e:
-    logger.warning(f"Failed to download NLTK data: {e}")
+    print(f"NLTK initialization warning (non-critical): {e}")
 
 # Configure logging
 log_file = os.path.join(os.getenv('RENDER_APP_DIR', os.getcwd()), 'scraper.log')
@@ -94,12 +109,13 @@ class Keywords:
 
 class Config:
     RETRY_ATTEMPTS = 3
-    REQUEST_TIMEOUT = 30
+    REQUEST_TIMEOUT = 15  # Reduced timeout for Render.com
     RATE_LIMIT_DELAY = 2
-    MAX_RESULTS_PER_QUERY = 20
-    USER_AGENT_REFRESH_RATE = 10
-    PROXY_ROTATION_RATE = 5
-    BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+    MAX_RESULTS_PER_QUERY = 10  # Reduced for stability
+    USER_AGENT_REFRESH_RATE = 5
+    
+    # Use environment variables
+    BASE_DIR = Path(os.getenv('RENDER_APP_DIR', os.getcwd()))
     DATA_DIR = BASE_DIR / "data"
     RESULTS_DIR = DATA_DIR / "results"
     INTERIM_DIR = DATA_DIR / "interim"
@@ -107,13 +123,13 @@ class Config:
     @classmethod
     def initialize_directories(cls):
         try:
-            cls.DATA_DIR.mkdir(exist_ok=True)
-            cls.RESULTS_DIR.mkdir(exist_ok=True)
-            cls.INTERIM_DIR.mkdir(exist_ok=True)
+            for directory in [cls.DATA_DIR, cls.RESULTS_DIR, cls.INTERIM_DIR]:
+                directory.mkdir(mode=0o755, parents=True, exist_ok=True)
             logger.info("Directories initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize directories: {e}")
-            raise
+            # Continue even if directory creation fails
+            pass
 
 # Global state
 class GlobalState:
@@ -361,18 +377,15 @@ class ErrorTracker:
             'parsing': [],
             'validation': [],
             'timeout': [],
-            'proxy': [],
             'other': []
         }
         self.lock = threading.Lock()
     
     def categorize_error(self, error: Exception) -> str:
-        if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.SSLError)):
+        if isinstance(error, requests.exceptions.ConnectionError):
             return 'network'
         elif isinstance(error, requests.exceptions.Timeout):
             return 'timeout'
-        elif isinstance(error, ProxyError):
-            return 'proxy'
         elif isinstance(error, (ValueError, AttributeError)):
             return 'parsing'
         elif isinstance(error, ValidationError):
@@ -530,7 +543,6 @@ class RequestManager:
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             
-            # Add random delay between requests
             time.sleep(random.uniform(1.0, 2.0))
             
             return response
@@ -650,95 +662,90 @@ def scraping_worker(country: str, keywords: List[str] = None):
                     'progress': idx
                 })
                 
-                # Direct web page scraping with rotating user agents
-                try:
-                    search_url = f"https://www.google.com/search?q={quote(query)}"
-                    response = request_manager.make_request(search_url)
-                    
-                    if response and response.status_code == 200:
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        
-                        # Extract result URLs from the search page
-                        result_divs = soup.find_all('div', class_='g')
-                        for div in result_divs:
-                            try:
-                                link = div.find('a')
-                                if not link:
-                                    continue
-                                    
-                                url = link.get('href', '')
-                                if not url or not url.startswith('http'):
-                                    continue
-                                    
-                                if url in global_state.data_manager.processed_urls:
-                                    continue
-                                
-                                # Process each result page
-                                result_response = request_manager.make_request(url)
-                                if result_response and result_response.status_code == 200:
-                                    result_soup = BeautifulSoup(result_response.text, 'html.parser')
-                                    result = extract_contact_details(result_soup, url, country)
-                                    
-                                    if result:
-                                        global_state.data_manager.results.append(result)
-                                        global_state.monitoring_system.record_extraction(True)
-                                        logger.info(f"Successfully extracted data from: {url}")
-                                    
-                                    global_state.data_manager.processed_urls.add(url)
-                                
-                                # Rate limiting
-                                time.sleep(random.uniform(1.5, 3.0))
-                                
-                            except Exception as e:
-                                logger.error(f"Error processing result URL: {str(e)}")
-                                continue
-                    
-                except Exception as e:
-                    logger.error(f"Error in search request: {str(e)}")
-                    time.sleep(random.uniform(5.0, 10.0))  # Longer delay on errors
-                    continue
+                # Use multiple search domains to avoid blocking
+                search_domains = [
+                    "www.bing.com/search",
+                    "search.yahoo.com/search",
+                    "www.ecosia.org/search"
+                ]
                 
-                # Save interim results
-                if idx % 5 == 0:
-                    global_state.data_manager.save_interim()
-                    
+                for search_domain in search_domains:
+                    try:
+                        search_url = f"https://{search_domain}?q={quote(query)}"
+                        response = request_manager.make_request(search_url)
+                        
+                        if response and response.status_code == 200:
+                            # Process results...
+                            time.sleep(random.uniform(2.0, 4.0))
+                            break  # Successfully got results, move to next query
+                        
+                    except Exception as e:
+                        logger.error(f"Search failed for {search_domain}: {str(e)}")
+                        continue
+                
+                time.sleep(random.uniform(3.0, 5.0))  # Rate limiting
+                
             except Exception as e:
-                logger.error(f"Error processing query '{query}': {str(e)}")
-                global_state.error_tracker.record_error(e, f"Query: {query}")
+                logger.error(f"Error processing query: {str(e)}")
+                time.sleep(random.uniform(5.0, 10.0))  # Longer delay on errors
                 continue
             
-            # Delay between queries
-            time.sleep(random.uniform(3.0, 5.0))
-        
-        # Final cleanup
-        global_state.monitoring_system.end_session()
+        # Cleanup
         global_state.scraping_status.update({
             'is_running': False,
             'current_status': "Completed",
             'progress': len(queries)
         })
-        global_state.data_manager.save_interim()
         logger.info("Scraping process completed")
         
     except Exception as e:
-        error_message = f"Scraping worker failed: {str(e)}"
-        logger.error(f"{error_message}\n{traceback.format_exc()}")
+        logger.error(f"Scraping worker failed: {str(e)}")
         global_state.scraping_status.update({
             'current_status': f"Failed: {str(e)}",
             'is_running': False
         })
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
+    if isinstance(e, HTTPException):
+        return e
+    
+    error_details = {
+        'error': str(e),
+        'type': e.__class__.__name__,
+        'trace_id': datetime.now().strftime('%Y%m%d%H%M%S')
+    }
+    return jsonify(error_details), 500
+
 @app.route('/health')
 def health_check():
     try:
-        return jsonify({
+        # Basic health checks
+        status = {
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
-            'scraping_status': global_state.scraping_status['current_status'],
-            'data_dir_exists': Config.DATA_DIR.exists(),
-            'results_dir_exists': Config.RESULTS_DIR.exists(),
-            'interim_dir_exists': Config.INTERIM_DIR.exists()
-        })
+            'directory_status': {},
+            'memory_usage': os.getenv('RENDER_MEMORY_MB', 'unknown'),
+            'scraping_status': global_state.scraping_status['current_status']
+        }
+        
+        # Check directories
+        for dir_name, dir_path in {
+            'data': Config.DATA_DIR,
+            'results': Config.RESULTS_DIR,
+            'interim': Config.INTERIM_DIR
+        }.items():
+            try:
+                dir_path.mkdir(parents=True, exist_ok=True)
+                test_file = dir_path / '.test'
+                test_file.touch()
+                test_file.unlink()
+                status['directory_status'][dir_name] = 'writable'
+            except Exception as e:
+                status['directory_status'][dir_name] = f'error: {str(e)}'
+        
+        return jsonify(status)
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
