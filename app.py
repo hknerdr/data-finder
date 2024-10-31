@@ -25,8 +25,16 @@ import traceback
 from werkzeug.exceptions import HTTPException
 import sys
 import pycountry
+import nltk  # Added import
 
-# Near the top of app.py, after imports
+# Initialize NLTK (ensure it's imported)
+try:
+    nltk.data.path.append('/opt/render/nltk_data')
+    nltk.download('punkt', quiet=True, download_dir='/opt/render/nltk_data')
+except Exception as e:
+    print(f"NLTK initialization warning (non-critical): {e}")
+
+# Configure logging to work with Render.com
 BASE_DIR = Path(os.getenv('RENDER_APP_DIR', os.getcwd()))
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
@@ -35,22 +43,6 @@ LOGS_DIR = BASE_DIR / "logs"
 for directory in [DATA_DIR, LOGS_DIR]:
     directory.mkdir(mode=0o755, parents=True, exist_ok=True)
 
-# Configure logging to work with Render.com
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)  # Log to stdout for Render.com to capture
-    ]
-)
-
-# Configure NLTK
-try:
-    nltk.data.path.append('/opt/render/nltk_data')
-    nltk.download('punkt', quiet=True, download_dir='/opt/render/nltk_data')
-except Exception as e:
-    print(f"NLTK initialization warning (non-critical): {e}")
-
 # Configure logging
 log_file = os.path.join(os.getenv('RENDER_APP_DIR', os.getcwd()), 'scraper.log')
 logging.basicConfig(
@@ -58,7 +50,7 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
         logging.FileHandler(log_file),
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout)  # Log to stdout for Render.com to capture
     ]
 )
 
@@ -130,6 +122,49 @@ class Config:
             # Continue even if directory creation fails
             pass
 
+# Define SearchEngine once before GlobalState
+class SearchEngine:
+    def __init__(self):
+        self.session = requests.Session()
+        self.user_agent = UserAgent()
+    
+    def search(self, query: str, country_code: str) -> List[str]:
+        try:
+            headers = {
+                'User-Agent': self.user_agent.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            
+            # Example using DuckDuckGo (you can modify for other search engines)
+            params = {
+                'q': query,
+                'kl': f'region:{country_code}',
+                'format': 'json'
+            }
+            
+            response = self.session.get(
+                'https://api.duckduckgo.com/',
+                params=params,
+                headers=headers,
+                timeout=10
+            )
+            
+            # Process results (modify according to the search engine's response format)
+            if response.status_code == 200:
+                results = response.json()
+                return [result['url'] for result in results.get('Results', [])]
+            
+            return []
+                
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}")
+            return []
+
 # Global state
 class GlobalState:
     def __init__(self):
@@ -146,8 +181,8 @@ class GlobalState:
         self.performance_optimizer = None
         self.error_tracker = None
         self.metrics_collector = None
-        self.search_engine = SearchEngine()
-
+        self.search_engine = SearchEngine()  # Now correctly defined
+    
     def initialize(self):
         try:
             self.data_manager = DataManager()
@@ -161,9 +196,6 @@ class GlobalState:
             raise
 
 global_state = GlobalState()
-
-# Initialize directories
-Config.initialize_directories()
 
 # Data Management Classes
 @dataclass
@@ -398,7 +430,7 @@ class ErrorTracker:
                 'timestamp': datetime.now().isoformat(),
                 'error': str(error),
                 'context': context,
-                'traceback': str(error.__traceback__)
+                'traceback': ''.join(traceback.format_exception(None, error, error.__traceback__))
             })
     
     def get_error_summary(self) -> Dict[str, Any]:
@@ -479,7 +511,7 @@ class SearchEngine:
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1'
             }
-
+            
             # Example using DuckDuckGo (you can modify for other search engines)
             params = {
                 'q': query,
@@ -500,56 +532,14 @@ class SearchEngine:
                 return [result['url'] for result in results.get('Results', [])]
             
             return []
-            
+                
         except Exception as e:
             logger.error(f"Search failed: {str(e)}")
             return []
 
-class RequestManager:
-    def __init__(self):
-        self.ua = UserAgent()
-        self.session = requests.Session()
-        self.request_count = 0
-    
-    def get_headers(self) -> Dict[str, str]:
-        self.request_count += 1
-        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
-            self.ua = UserAgent()
-        
-        return {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-    
-    @retry(
-        stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
-        wait=wait_exponential(multiplier=1, min=4, max=10)
-    )
-    def make_request(self, url: str, method: str = 'get', **kwargs) -> Optional[requests.Response]:
-        try:
-            kwargs.update({
-                'headers': self.get_headers(),
-                'timeout': Config.REQUEST_TIMEOUT,
-                'verify': True,
-                'allow_redirects': True
-            })
-            
-            response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-            
-            time.sleep(random.uniform(1.0, 2.0))
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Request failed for {url}: {str(e)}")
-            return None
+# Data Manager and other classes remain unchanged...
 
+# Error Handler
 @app.errorhandler(Exception)
 def handle_exception(e):
     logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
@@ -567,59 +557,7 @@ def handle_exception(e):
     
     return jsonify(error_details), 500
 
-# Add this after your imports
-import pycountry
-
-# Add this to your GlobalState class
-class GlobalState:
-    def __init__(self):
-        # Existing initialization code...
-        self.search_engine = SearchEngine()  # Add this line
-
-# Add these new classes
-class SearchEngine:
-    def __init__(self):
-        self.session = requests.Session()
-        self.user_agent = UserAgent()
-    
-    def search(self, query: str, country_code: str) -> List[str]:
-        try:
-            headers = {
-                'User-Agent': self.user_agent.random,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            }
-            
-            # Example using DuckDuckGo (you can modify for other search engines)
-            params = {
-                'q': query,
-                'kl': f'region:{country_code}',
-                'format': 'json'
-            }
-            
-            response = self.session.get(
-                'https://api.duckduckgo.com/',
-                params=params,
-                headers=headers,
-                timeout=10
-            )
-            
-            # Process results (modify according to the search engine's response format)
-            if response.status_code == 200:
-                results = response.json()
-                return [result['url'] for result in results.get('Results', [])]
-            
-            return []
-            
-        except Exception as e:
-            logger.error(f"Search failed: {str(e)}")
-            return []
-
-# Update the home route
+# Home Route
 @app.route('/')
 def home():
     try:
@@ -636,7 +574,7 @@ def home():
         logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
-# Update the scraping_worker function
+# Scraping Worker Function
 def scraping_worker(country: str, keywords: List[str] = None):
     """Worker function for scraping process"""
     try:
@@ -704,19 +642,7 @@ def scraping_worker(country: str, keywords: List[str] = None):
             'is_running': False
         })
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-    logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
-    if isinstance(e, HTTPException):
-        return e
-    
-    error_details = {
-        'error': str(e),
-        'type': e.__class__.__name__,
-        'trace_id': datetime.now().strftime('%Y%m%d%H%M%S')
-    }
-    return jsonify(error_details), 500
-
+# Health Check Route
 @app.route('/health')
 def health_check():
     try:
@@ -749,22 +675,7 @@ def health_check():
         logger.error(f"Health check failed: {str(e)}")
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
-@app.route('/')
-def home():
-    try:
-        # Get list of countries
-        countries = [(country.alpha_2, country.name) 
-                    for country in pycountry.countries]
-        countries.sort(key=lambda x: x[1])  # Sort by country name
-        
-        return render_template('index.html',
-                             countries=countries,
-                             industry_keywords=Keywords.INDUSTRY_KEYWORDS,
-                             business_keywords=Keywords.BUSINESS_KEYWORDS)
-    except Exception as e:
-        logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({'error': str(e)}), 500
-
+# Start Scraping Route
 @app.route('/start_scraping', methods=['POST'])
 def start_scraping():
     try:
@@ -813,6 +724,7 @@ def start_scraping():
             'type': e.__class__.__name__
         }), 500
 
+# Stop Scraping Route
 @app.route('/stop_scraping', methods=['POST'])
 def stop_scraping():
     try:
@@ -822,6 +734,7 @@ def stop_scraping():
         logger.error(f"Error stopping scraping: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# Status Route
 @app.route('/status')
 def get_status():
     try:
@@ -835,6 +748,7 @@ def get_status():
         logger.error(f"Error getting status: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# Download Results Route
 @app.route('/download/<format>')
 def download_results(format):
     try:
@@ -862,6 +776,7 @@ def download_results(format):
         logger.error(f"Error downloading results: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# Metrics Route
 @app.route('/metrics')
 def get_metrics():
     try:
@@ -875,6 +790,7 @@ def get_metrics():
         logger.error(f"Error getting metrics: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# Errors Route
 @app.route('/errors')
 def get_errors():
     try:
