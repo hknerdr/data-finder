@@ -8,7 +8,7 @@ import time
 import re
 import phonenumbers
 import logging
-from urllib.parse import urlparse, quote_plus, parse_qs
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta
 import json
 import csv
@@ -21,7 +21,6 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 import statistics
 import traceback
-from werkzeug.exceptions import HTTPException
 import sys
 import pycountry
 
@@ -348,18 +347,22 @@ class SearchEngine:
             )
 
             logger.debug(f"Google response status code: {response.status_code}")
+            logger.debug(f"Response content snippet: {response.text[:1000]}")  # İlk 1000 karakteri logla
 
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 results = []
-                for a_tag in soup.find_all('a'):
-                    href = a_tag.get('href')
-                    if href and href.startswith('/url?q='):
-                        url = parse_qs(urlparse(href).query).get('q')
-                        if url:
-                            clean_url = url[0].split('&')[0]
-                            if clean_url.startswith('http'):
-                                results.append(clean_url)
+                # Google'ın yeni HTML yapısına uygun olarak sonuçları çekin
+                for g in soup.find_all('div', class_='g'):
+                    a_tag = g.find('a')
+                    if a_tag and a_tag['href']:
+                        url = a_tag['href']
+                        if url.startswith('/url?q='):
+                            parsed_url = parse_qs(urlparse(url).query).get('q')
+                            if parsed_url:
+                                clean_url = parsed_url[0].split('&')[0]
+                                if clean_url.startswith('http'):
+                                    results.append(clean_url)
                 logger.debug(f"Found {len(results)} URLs for query: '{query}'")
                 return results
             else:
@@ -437,6 +440,7 @@ def scraping_worker(country: str, keywords: List[str] = None):
                                 'Phones': contacts['Phones']
                             })
                         logger.debug(f"Extracted contacts from {url}: {contacts}")
+                        global_state.monitoring_system.record_extraction(True)
                     else:
                         with global_state.lock:
                             global_state.scraping_status['results'].append({
@@ -444,6 +448,8 @@ def scraping_worker(country: str, keywords: List[str] = None):
                                 'Emails': [],
                                 'Phones': []
                             })
+                        logger.debug(f"No contacts found in {url}.")
+                        global_state.monitoring_system.record_extraction(False)
 
                 # Optional: Save interim results periodically
                 if idx % 50 == 0:
@@ -489,9 +495,23 @@ def scraping_worker(country: str, keywords: List[str] = None):
 def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
     if not keywords:
         keywords = [f"{industry} {business}" for industry in Keywords.INDUSTRY_KEYWORDS for business in Keywords.BUSINESS_KEYWORDS]
-    queries = [f"{keyword} {country}" for keyword in keywords]
+    # Use country name instead of code
+    country_name = get_country_name(country)
+    queries = [f"{keyword} {country_name}" for keyword in keywords]
     logger.debug(f"Generated {len(queries)} search queries.")
     return queries
+
+def get_country_name(country_code: str) -> str:
+    try:
+        country = pycountry.countries.get(alpha_2=country_code.upper())
+        if country:
+            return country.name
+        else:
+            logger.warning(f"Invalid country code: {country_code}. Using as is.")
+            return country_code
+    except Exception as e:
+        logger.error(f"Error getting country name for code '{country_code}': {e}")
+        return country_code
 
 EMAIL_REGEX = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
 PHONE_REGEX = r'\+?\d[\d -]{8,}\d'
@@ -570,9 +590,12 @@ class RequestManager:
             global_state.performance_optimizer.record_request_time(duration)
             response.raise_for_status()
             logger.debug(f"Received response from {url} in {duration:.2f} seconds.")
+            logger.debug(f"Response content snippet: {response.text[:500]}")  # İlk 500 karakteri logla
+            global_state.monitoring_system.record_request(True)
             return response
         except Exception as e:
             logger.error(f"Request failed for {url}: {e}")
+            global_state.monitoring_system.record_request(False)
             global_state.monitoring_system.log_error(e, context=f"URL: {url}")
             raise
 
