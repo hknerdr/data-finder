@@ -1,4 +1,4 @@
-# File: /app.py
+# File: app.py
 
 from flask import Flask, render_template, request, jsonify, send_file
 import requests
@@ -9,14 +9,11 @@ import re
 import phonenumbers
 import logging
 from urllib.parse import urlparse, quote_plus, parse_qs
-import datetime
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
-import io
 import csv
 import os
 from fake_useragent import UserAgent
-import itertools
 from tenacity import retry, stop_after_attempt, wait_exponential
 import random
 from pathlib import Path
@@ -28,33 +25,36 @@ from werkzeug.exceptions import HTTPException
 import sys
 import pycountry
 
-# Configure logging to work with Render.com
-BASE_DIR = Path(os.getenv('RENDER_APP_DIR', os.getcwd()))
-DATA_DIR = BASE_DIR / "data"
-LOGS_DIR = BASE_DIR / "logs"
-
-# Create necessary directories with proper permissions
-for directory in [DATA_DIR, LOGS_DIR]:
-    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
-
 # Configure logging
-log_file = os.path.join(os.getenv('RENDER_APP_DIR', os.getcwd()), 'scraper.log')
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler(sys.stdout)  # Log to stdout for Render.com to capture
+        logging.StreamHandler(sys.stdout)
     ]
 )
-
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # Configuration and Keywords
+class Keywords:
+    INDUSTRY_KEYWORDS = [
+        'Non-Alcoholic Beverages', 'Soft Drinks', 'Beverages', 'Juices', 'Mineral Water',
+        'Bottled Water', 'Energy Drinks', 'Sports Drinks', 'Carbonated Drinks',
+        'Flavored Water', 'Herbal Drinks', 'Functional Beverages', 'Dairy Beverages',
+        'Plant-Based Beverages', 'Smoothies', 'Iced Tea', 'Ready-to-Drink Coffee',
+        'Mocktails', 'Kombucha', 'Vitamin Water'
+    ]
+
+    BUSINESS_KEYWORDS = [
+        'Distributor', 'Wholesaler', 'Supplier', 'Trader', 'Dealer', 'Reseller',
+        'Stockist', 'Merchant', 'Importer', 'Exporter', 'Agency', 'Broker',
+        'Trading Company', 'Bulk Supplier', 'B2B Supplier'
+    ]
+
 @dataclass
-class ProxyConfig:
+class Proxy:
     protocol: str
     host: str
     port: int
@@ -73,97 +73,102 @@ class ProxyConfig:
             'https': proxy_url
         }
 
-class ProxyConfigManager:
-    def __init__(self, config_path: str = "config/proxy_config.json"):
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        self.proxies = [ProxyConfig(**proxy) for proxy in config.get('proxies', [])]
-        self.settings = config.get('settings', {})
-
-    def get_proxy(self) -> Optional[ProxyConfig]:
-        if not self.proxies:
-            return None
-        # Implement proxy rotation logic if needed
-        return random.choice(self.proxies)
-
-class Keywords:
-    INDUSTRY_KEYWORDS = [
-        'Non-Alcoholic Beverages', 'Soft Drinks', 'Beverages', 'Juices', 'Mineral Water',
-        'Bottled Water', 'Energy Drinks', 'Sports Drinks', 'Carbonated Drinks',
-        'Flavored Water', 'Herbal Drinks', 'Functional Beverages', 'Dairy Beverages',
-        'Plant-Based Beverages', 'Smoothies', 'Iced Tea', 'Ready-to-Drink Coffee',
-        'Mocktails', 'Kombucha', 'Vitamin Water'
-    ]
-
-    BUSINESS_KEYWORDS = [
-        'Distributor', 'Wholesaler', 'Supplier', 'Trader', 'Dealer', 'Reseller',
-        'Stockist', 'Merchant', 'Importer', 'Exporter', 'Agency', 'Broker',
-        'Trading Company', 'Bulk Supplier', 'B2B Supplier'
-    ]
-
-class Config:
-    RETRY_ATTEMPTS = 3
-    REQUEST_TIMEOUT = 15  # Reduced timeout for Render.com
-    RATE_LIMIT_DELAY = 2
-    MAX_RESULTS_PER_QUERY = 10  # Reduced for stability
-    USER_AGENT_REFRESH_RATE = 5
-
-    # Use environment variables
-    BASE_DIR = Path(os.getenv('RENDER_APP_DIR', os.getcwd()))
-    DATA_DIR = BASE_DIR / "data"
-    RESULTS_DIR = DATA_DIR / "results"
-    INTERIM_DIR = DATA_DIR / "interim"
-
-    @classmethod
-    def initialize_directories(cls):
-        try:
-            for directory in [cls.DATA_DIR, cls.RESULTS_DIR, cls.INTERIM_DIR]:
-                directory.mkdir(mode=0o755, parents=True, exist_ok=True)
-            logger.info("Directories initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize directories: {e}")
-            # Continue even if directory creation fails
-            pass
-
-# Define SearchEngine
-class SearchEngine:
+class GlobalState:
     def __init__(self):
+        self.scraping_status = {
+            'is_running': False,
+            'progress': 0,
+            'total': 0,
+            'current_status': 'Ready',
+            'results': [],
+            'errors': []
+        }
+        self.proxies: List[Proxy] = []
+        self.data_manager = DataManager()
+        self.lock = threading.Lock()
+        self.search_engine = SearchEngine(self)
+        self.monitoring_system = MonitoringSystem()
+        self.performance_optimizer = PerformanceOptimizer()
+        self.error_tracker = ErrorTracker()
+        self.metrics_collector = MetricsCollector()
+
+global_state = GlobalState()
+
+# Data Management Classes
+class DataManager:
+    def __init__(self):
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.interim_file = Path("data/interim") / f"interim_{self.session_id}.json"
+        self.results = []
+        self.processed_urls = set()
+
+    def save_interim(self):
+        try:
+            self.interim_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.interim_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'results': self.results,
+                    'processed_urls': list(self.processed_urls)
+                }, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved interim results to {self.interim_file}")
+        except Exception as e:
+            logger.error(f"Failed to save interim results: {e}")
+
+    def export_results(self, format: str = 'csv') -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            if format == 'csv':
+                filename = Path("data/results") / f"results_{timestamp}.csv"
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                with open(filename, 'w', newline='', encoding='utf-8') as f:
+                    if self.results:
+                        fieldnames = ['URL', 'Emails', 'Phones']
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        for result in self.results:
+                            writer.writerow({
+                                'URL': result.get('URL', ''),
+                                'Emails': ', '.join(result.get('Emails', [])),
+                                'Phones': ', '.join(result.get('Phones', []))
+                            })
+                return str(filename)
+            elif format == 'json':
+                filename = Path("data/results") / f"results_{timestamp}.json"
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(self.results, f, indent=2, ensure_ascii=False)
+                return str(filename)
+        except Exception as e:
+            logger.error(f"Failed to export results: {e}")
+            return ""
+
+class SearchEngine:
+    def __init__(self, state: GlobalState):
+        self.state = state
         self.session = requests.Session()
         self.user_agent = UserAgent()
-        self.proxy_manager = ProxyConfigManager()  # Initialize proxy manager
 
-    def search(self, query: str, country_code: str) -> List[str]:
+    def search(self, query: str) -> List[str]:
         try:
             headers = {
                 'User-Agent': self.user_agent.random,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
                 'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1'
             }
-
-            # Example using Google Search
-            params = {
-                'q': query,
-                'hl': 'en',
-                'num': Config.MAX_RESULTS_PER_QUERY  # Number of results per page
-            }
-
-            # Get proxy if available
-            proxy = self.proxy_manager.get_proxy()
-            proxies = proxy.to_dict() if proxy else None
+            params = {'q': query, 'hl': 'en', 'num': 10}
+            proxies = self.get_proxies()
 
             response = self.session.get(
                 'https://www.google.com/search',
                 params=params,
                 headers=headers,
                 proxies=proxies,
-                timeout=Config.REQUEST_TIMEOUT
+                timeout=15
             )
 
-            # Process results
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 results = []
@@ -176,180 +181,18 @@ class SearchEngine:
                             if clean_url.startswith('http'):
                                 results.append(clean_url)
                 return results
-
+            return []
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
             return []
 
-        except Exception as e:
-            logger.error(f"Search failed: {str(e)}")
-            return []
+    def get_proxies(self) -> Optional[Dict[str, str]]:
+        if not self.state.proxies:
+            return None
+        proxy = random.choice(self.state.proxies)
+        return proxy.to_dict()
 
-# Global state
-class GlobalState:
-    def __init__(self):
-        self.scraping_status = {
-            'is_running': False,
-            'progress': 0,
-            'total': 0,
-            'current_status': 'Ready',
-            'results': [],
-            'errors': []
-        }
-        self.data_manager = None
-        self.monitoring_system = None
-        self.performance_optimizer = None
-        self.error_tracker = None
-        self.metrics_collector = None
-        self.search_engine = SearchEngine()  # Now correctly defined
-        self.lock = threading.Lock()
-
-    def initialize(self):
-        try:
-            self.data_manager = DataManager()
-            self.monitoring_system = MonitoringSystem()
-            self.performance_optimizer = PerformanceOptimizer()
-            self.error_tracker = ErrorTracker()
-            self.metrics_collector = MetricsCollector()
-            logger.info("Global state initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize global state: {e}")
-            raise
-
-global_state = GlobalState()
-
-# Data Management Classes
-@dataclass
-class ScrapingMetrics:
-    start_time: datetime = None
-    end_time: datetime = None
-    total_urls: int = 0
-    processed_urls: int = 0
-    successful_extractions: int = 0
-    failed_extractions: int = 0
-    total_requests: int = 0
-    failed_requests: int = 0
-
-    @property
-    def duration(self) -> timedelta:
-        if self.start_time and self.end_time:
-            return self.end_time - self.start_time
-        return timedelta(0)
-
-    @property
-    def success_rate(self) -> float:
-        if self.total_requests == 0:
-            return 0
-        return (self.successful_extractions / self.total_requests) * 100
-
-class DataManager:
-    def __init__(self):
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.interim_file = Config.INTERIM_DIR / f"interim_{self.session_id}.json"
-        self.results = []
-        self.processed_urls = set()
-
-    def save_interim(self):
-        try:
-            with open(self.interim_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'results': self.results,
-                    'processed_urls': list(self.processed_urls)
-                }, f, ensure_ascii=False, indent=2)
-            logger.info(f"Saved interim results to {self.interim_file}")
-        except Exception as e:
-            logger.error(f"Failed to save interim results: {e}")
-
-    def load_interim(self) -> bool:
-        try:
-            if self.interim_file.exists():
-                with open(self.interim_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.results = data.get('results', [])
-                    self.processed_urls = set(data.get('processed_urls', []))
-                logger.info(f"Loaded interim results: {len(self.results)} entries")
-                return True
-        except Exception as e:
-            logger.error(f"Failed to load interim results: {e}")
-        return False
-
-    def export_results(self, format: str = 'csv') -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        try:
-            if format == 'csv':
-                filename = Config.RESULTS_DIR / f"results_{timestamp}.csv"
-                with open(filename, 'w', newline='', encoding='utf-8') as f:
-                    if self.results:
-                        # Include 'Phones' in the CSV
-                        fieldnames = ['URL', 'Emails', 'Phones']
-                        writer = csv.DictWriter(f, fieldnames=fieldnames)
-                        writer.writeheader()
-                        for result in self.results:
-                            writer.writerow({
-                                'URL': result.get('URL', ''),
-                                'Emails': ', '.join(result.get('Emails', [])),
-                                'Phones': ', '.join(result.get('Phones', []))
-                            })
-                return str(filename)
-            elif format == 'json':
-                filename = Config.RESULTS_DIR / f"results_{timestamp}.json"
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(self.results, f, indent=2, ensure_ascii=False)
-                return str(filename)
-        except Exception as e:
-            logger.error(f"Failed to export results: {e}")
-            return ""
-
-class DataCleaner:
-    @staticmethod
-    def clean_text(text: str) -> str:
-        if not text:
-            return ""
-        # Simple text cleaning without NLTK
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
-
-    @staticmethod
-    def normalize_phone(phone: str, country_code: str) -> str:
-        try:
-            if not phone.startswith('+'):
-                phone = f"+{phone}"
-            parsed = phonenumbers.parse(phone, country_code)
-            if phonenumbers.is_valid_number(parsed):
-                return phonenumbers.format_number(
-                    parsed,
-                    phonenumbers.PhoneNumberFormat.INTERNATIONAL
-                )
-        except Exception as e:
-            logger.debug(f"Phone normalization failed: {e}")
-        return phone
-
-    @staticmethod
-    def normalize_email(email: str) -> str:
-        return email.lower().strip()
-
-    @staticmethod
-    def clean_company_name(name: str) -> str:
-        if not name:
-            return ""
-        suffixes = ['ltd', 'llc', 'inc', 'corp', 'corporation', 'co', 'company']
-        name = name.lower()
-        for suffix in suffixes:
-            name = re.sub(f"\\b{suffix}\\b", "", name)
-        name = re.sub(r'[^\w\s-]', '', name)
-        name = re.sub(r'\s+', ' ', name)
-        return name.strip().title()
-
-    @staticmethod
-    def remove_duplicates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        seen_urls = set()
-        cleaned = []
-
-        for result in results:
-            url = result.get('URL')
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                cleaned.append(result)
-        return cleaned
-
+# Additional Classes
 class MonitoringSystem:
     def __init__(self):
         self.metrics = ScrapingMetrics()
@@ -395,6 +238,27 @@ class MonitoringSystem:
                 'success_rate': f"{self.metrics.success_rate:.2f}%",
                 'error_count': len(self.error_log)
             }
+
+class ScrapingMetrics:
+    def __init__(self, start_time: Optional[datetime] = None):
+        self.start_time = start_time
+        self.end_time: Optional[datetime] = None
+        self.total_requests: int = 0
+        self.failed_requests: int = 0
+        self.successful_extractions: int = 0
+        self.failed_extractions: int = 0
+
+    @property
+    def duration(self) -> timedelta:
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return timedelta(0)
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_requests == 0:
+            return 0
+        return (self.successful_extractions / self.total_requests) * 100
 
 class PerformanceOptimizer:
     def __init__(self):
@@ -517,154 +381,148 @@ class MetricsCollector:
         with self.lock:
             self.metrics.update(new_metrics)
 
-# Request Manager Class
-class RequestManager:
-    def __init__(self):
-        self.ua = UserAgent()
-        self.session = requests.Session()
-        self.request_count = 0
-        self.proxy_manager = ProxyConfigManager()
+# Proxy Validation Function
+def validate_proxy(proxy: Proxy) -> bool:
+    try:
+        proxies = proxy.to_dict()
+        response = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=10)
+        return response.status_code == 200
+    except:
+        return False
 
-    def get_headers(self) -> Dict[str, str]:
-        self.request_count += 1
-        if self.request_count % Config.USER_AGENT_REFRESH_RATE == 0:
-            self.ua = UserAgent()
-
-        return {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-
-    @retry(
-        stop=stop_after_attempt(Config.RETRY_ATTEMPTS),
-        wait=wait_exponential(multiplier=1, min=4, max=10)
-    )
-    def make_request(self, url: str, method: str = 'get', **kwargs) -> Optional[requests.Response]:
-        try:
-            headers = self.get_headers()
-            kwargs.update({
-                'headers': headers,
-                'timeout': Config.REQUEST_TIMEOUT,
-                'verify': True,
-                'allow_redirects': True
-            })
-
-            # Get proxy if available
-            proxy = self.proxy_manager.get_proxy()
-            proxies = proxy.to_dict() if proxy else None
-            kwargs['proxies'] = proxies
-
-            response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Request failed for {url}: {str(e)}")
-            raise  # To trigger retry
-
-# Error Handler
-@app.errorhandler(Exception)
-def handle_exception(e):
-    logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
-    if isinstance(e, HTTPException):
-        return e
-
-    error_details = {
-        'error': str(e),
-        'type': e.__class__.__name__,
-        'trace_id': datetime.now().strftime('%Y%m%d%H%M%S')
-    }
-
-    if app.debug:
-        error_details['traceback'] = traceback.format_exc()
-
-    return jsonify(error_details), 500
-
-# Home Route
+# Routes
 @app.route('/')
 def home():
     try:
-        # Get list of countries
-        countries = [(country.alpha_2, country.name) 
-                    for country in pycountry.countries]
-        countries.sort(key=lambda x: x[1])  # Sort by country name
-
-        return render_template('index.html',
-                             countries=countries,
-                             industry_keywords=Keywords.INDUSTRY_KEYWORDS,
-                             business_keywords=Keywords.BUSINESS_KEYWORDS)
+        countries = [(country.alpha_2, country.name) for country in pycountry.countries]
+        countries.sort(key=lambda x: x[1])
+        return render_template('index.html', countries=countries,
+                               industry_keywords=Keywords.INDUSTRY_KEYWORDS,
+                               business_keywords=Keywords.BUSINESS_KEYWORDS)
     except Exception as e:
-        logger.error(f"Error in home route: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Error in home route: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Email and Phone Extraction Regex
-EMAIL_REGEX = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
-PHONE_REGEX = r'\+?\d[\d -]{8,}\d'
-
-def extract_emails(text):
-    return re.findall(EMAIL_REGEX, text)
-
-def extract_phone_numbers(text, country_code='US'):
-    phones = []
-    for match in re.findall(PHONE_REGEX, text):
-        try:
-            parsed = phonenumbers.parse(match, country_code)
-            if phonenumbers.is_valid_number(parsed):
-                formatted = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-                phones.append(formatted)
-        except:
-            continue
-    return phones
-
-def extract_contacts_from_url(url: str, request_manager: RequestManager, country_code: str = 'US') -> Dict[str, List[str]]:
-    """Fetches the content of a URL and extracts email addresses and phone numbers."""
-    emails = []
-    phones = []
+@app.route('/add_proxies', methods=['POST'])
+def add_proxies():
     try:
-        response = request_manager.make_request(url)
-        if response and response.status_code == 200:
-            emails = extract_emails(response.text)
-            phones = extract_phone_numbers(response.text, country_code)
-            # Validate and clean emails
-            emails = [DataValidator.normalize_email(email) for email in emails if DataValidator.validate_email(email)]
-            # Validate and clean phone numbers
-            phones = [DataValidator.normalize_phone(phone, country_code) for phone in phones if DataValidator.validate_phone(phone, country_code)]
-            # Remove duplicates
-            emails = list(set(emails))
-            phones = list(set(phones))
+        data = request.json
+        proxies = data.get('proxies', [])
+        new_proxies = []
+        for p in proxies:
+            proxy = Proxy(protocol=p['protocol'],
+                          host=p['host'],
+                          port=int(p['port']),
+                          username=p.get('username', ''),
+                          password=p.get('password', ''))
+            new_proxies.append(proxy)
+        with global_state.lock:
+            global_state.proxies.extend(new_proxies)
+        return jsonify({'message': 'Proxies added successfully'}), 200
     except Exception as e:
-        logger.error(f"Failed to extract contacts from {url}: {str(e)}")
-    return {'Emails': emails, 'Phones': phones}
+        logger.error(f"Error adding proxies: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# Define the generate_search_queries function
-def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
-    """
-    Generate a list of search queries based on the selected country and keywords.
-    If no keywords are provided, use default industry and business keyword combinations.
-    """
-    if not keywords:
-        # Generate combinations of industry and business keywords
-        keywords = [f"{industry} {business}" for industry in Keywords.INDUSTRY_KEYWORDS for business in Keywords.BUSINESS_KEYWORDS]
+@app.route('/validate_proxies', methods=['POST'])
+def validate_proxies():
+    try:
+        with global_state.lock:
+            proxies = global_state.proxies.copy()
+        results = []
+        for proxy in proxies:
+            is_valid = validate_proxy(proxy)
+            results.append({
+                'proxy': proxy.get_url(),
+                'valid': is_valid
+            })
+        return jsonify({'validation_results': results}), 200
+    except Exception as e:
+        logger.error(f"Error validating proxies: {e}")
+        return jsonify({'error': str(e)}), 500
 
-    # Incorporate the country into the search queries
-    queries = [f"{keyword} {country}" for keyword in keywords]
-    return queries
+@app.route('/start_scraping', methods=['POST'])
+def start_scraping():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data received'}), 400
+        country = data.get('country')
+        if not country:
+            return jsonify({'error': 'Missing country'}), 400
+        keywords = data.get('keywords', '')
+        if isinstance(keywords, str):
+            keywords = [k.strip() for k in keywords.split('\n') if k.strip()]
+        elif not isinstance(keywords, list):
+            keywords = []
+
+        with global_state.lock:
+            global_state.scraping_status.update({
+                'is_running': True,
+                'progress': 0,
+                'total': 0,
+                'current_status': 'Starting...',
+                'results': [],
+                'errors': []
+            })
+            global_state.data_manager.results = []
+            global_state.data_manager.processed_urls = set()
+
+        thread = threading.Thread(target=scraping_worker, args=(country, keywords))
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({'message': 'Scraping started successfully'}), 200
+    except Exception as e:
+        logger.error(f"Error in start_scraping: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/stop_scraping', methods=['POST'])
+def stop_scraping():
+    try:
+        with global_state.lock:
+            global_state.scraping_status['is_running'] = False
+        return jsonify({'message': 'Scraping stopped'}), 200
+    except Exception as e:
+        logger.error(f"Error stopping scraping: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/status')
+def get_status():
+    try:
+        with global_state.lock:
+            return jsonify({
+                **global_state.scraping_status,
+                'metrics': global_state.metrics_collector.metrics if global_state.metrics_collector else {},
+                'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
+                'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {}
+            })
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/<format>')
+def download_results(format):
+    try:
+        if format not in ['csv', 'json']:
+            return jsonify({'error': 'Invalid format'}), 400
+        if not global_state.data_manager or not global_state.data_manager.results:
+            return jsonify({'error': 'No results available'}), 404
+        filename = global_state.data_manager.export_results(format)
+        if not filename:
+            return jsonify({'error': 'Export failed'}), 500
+        return send_file(filename, as_attachment=True,
+                        download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}')
+    except Exception as e:
+        logger.error(f"Error downloading results: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # Scraping Worker Function
 def scraping_worker(country: str, keywords: List[str] = None):
-    """Worker function for scraping process"""
     try:
         queries = generate_search_queries(country, keywords)
         with global_state.lock:
             global_state.scraping_status['total'] = len(queries)
 
-        global_state.monitoring_system.start_session()
         logger.info(f"Starting scraping for country: {country} with {len(queries)} queries")
 
         request_manager = RequestManager()
@@ -682,15 +540,11 @@ def scraping_worker(country: str, keywords: List[str] = None):
                     global_state.scraping_status['current_status'] = status_message
                     global_state.scraping_status['progress'] = idx
 
-                # Use only Google as the search engine
-                search_url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
-
-                results = global_state.search_engine.search(query, country)
+                results = global_state.search_engine.search(query)
 
                 if not results:
                     logger.warning(f"No results found for query: {query}")
 
-                # Visit each URL and extract emails and phones
                 for url in results:
                     with global_state.lock:
                         if url in global_state.data_manager.processed_urls:
@@ -714,40 +568,27 @@ def scraping_worker(country: str, keywords: List[str] = None):
                                 'Phones': []
                             })
 
-                # Update progress
-                global_state.monitoring_system.record_extraction(True)
-                global_state.metrics_collector.update_metrics({
-                    'last_processed_query': query,
-                    'total_extracted_links': len(results)
-                })
-
-                logger.debug(f"Successfully fetched data from Google: {len(results)} links")
-
                 time.sleep(random.uniform(2.0, 4.0))
 
             except Exception as e:
-                logger.error(f"Error processing query: {str(e)}")
-                global_state.error_tracker.record_error(e, context=query)
-                time.sleep(random.uniform(5.0, 10.0))  # Longer delay on errors
+                logger.error(f"Error processing query: {e}")
+                with global_state.lock:
+                    global_state.scraping_status['errors'].append(str(e))
+                time.sleep(random.uniform(5.0, 10.0))
                 continue
 
-            # Save interim results periodically
             if idx % 50 == 0:
                 with global_state.lock:
                     global_state.data_manager.results = global_state.scraping_status['results']
                 global_state.data_manager.save_interim()
 
-        # After all queries are processed
-        # Perform data cleaning and deduplication
         with global_state.lock:
             cleaned_results = DataCleaner.remove_duplicates(global_state.scraping_status['results'])
             global_state.scraping_status['results'] = cleaned_results
 
-        # Save final results
         global_state.data_manager.results = cleaned_results
         global_state.data_manager.save_interim()
 
-        # Update scraping status
         with global_state.lock:
             global_state.scraping_status.update({
                 'is_running': False,
@@ -757,189 +598,112 @@ def scraping_worker(country: str, keywords: List[str] = None):
         logger.info("Scraping process completed")
 
     except Exception as e:
-        logger.error(f"Scraping worker failed: {str(e)}")
-        global_state.error_tracker.record_error(e, context="scraping_worker")
+        logger.error(f"Scraping worker failed: {e}")
         with global_state.lock:
             global_state.scraping_status.update({
-                'current_status': f"Failed: {str(e)}",
+                'current_status': f"Failed: {e}",
                 'is_running': False
             })
 
-# Health Check Route
-@app.route('/health')
-def health_check():
+# Utility Functions
+def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
+    if not keywords:
+        keywords = [f"{industry} {business}" for industry in Keywords.INDUSTRY_KEYWORDS for business in Keywords.BUSINESS_KEYWORDS]
+    queries = [f"{keyword} {country}" for keyword in keywords]
+    return queries
+
+EMAIL_REGEX = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
+PHONE_REGEX = r'\+?\d[\d -]{8,}\d'
+
+def extract_emails(text):
+    return re.findall(EMAIL_REGEX, text)
+
+def extract_phone_numbers(text, country_code='US'):
+    phones = []
+    for match in re.findall(PHONE_REGEX, text):
+        try:
+            parsed = phonenumbers.parse(match, country_code)
+            if phonenumbers.is_valid_number(parsed):
+                formatted = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+                phones.append(formatted)
+        except:
+            continue
+    return phones
+
+def extract_contacts_from_url(url: str, request_manager: 'RequestManager', country_code: str = 'US') -> Dict[str, List[str]]:
+    emails = []
+    phones = []
     try:
-        # Basic health checks
-        status = {
-            'status': 'healthy',
-            'timestamp': datetime.now().isoformat(),
-            'directory_status': {},
-            'memory_usage': os.getenv('RENDER_MEMORY_MB', 'unknown'),
-            'scraping_status': global_state.scraping_status['current_status']
+        response = request_manager.make_request(url)
+        if response and response.status_code == 200:
+            emails = extract_emails(response.text)
+            phones = extract_phone_numbers(response.text, country_code)
+            emails = [email.lower().strip() for email in emails if DataValidator.validate_email(email)]
+            phones = [phone.strip() for phone in phones if DataValidator.validate_phone(phone, country_code)]
+            emails = list(set(emails))
+            phones = list(set(phones))
+    except Exception as e:
+        logger.error(f"Failed to extract contacts from {url}: {e}")
+    return {'Emails': emails, 'Phones': phones}
+
+# Request Manager Class
+class RequestManager:
+    def __init__(self):
+        self.ua = UserAgent()
+        self.session = requests.Session()
+        self.request_count = 0
+
+    def get_headers(self) -> Dict[str, str]:
+        self.request_count += 1
+        if self.request_count % 5 == 0:
+            self.ua = UserAgent()
+        return {
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
 
-        # Check directories
-        for dir_name, dir_path in {
-            'data': Config.DATA_DIR,
-            'results': Config.RESULTS_DIR,
-            'interim': Config.INTERIM_DIR
-        }.items():
-            try:
-                dir_path.mkdir(parents=True, exist_ok=True)
-                test_file = dir_path / '.test'
-                test_file.touch()
-                test_file.unlink()
-                status['directory_status'][dir_name] = 'writable'
-            except Exception as e:
-                status['directory_status'][dir_name] = f'error: {str(e)}'
-
-        return jsonify(status)
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
-
-# Start Scraping Route
-@app.route('/start_scraping', methods=['POST'])
-def start_scraping():
-    try:
-        data = request.json
-        if not data:
-            logger.error("No JSON data received")
-            return jsonify({'error': 'No data received'}), 400
-
-        logger.debug(f"Received data: {data}")
-
-        country = data.get('country')
-        if not country:
-            return jsonify({'error': 'Missing country'}), 400
-
-        keywords = data.get('keywords', '')
-        if isinstance(keywords, str):
-            keywords = [k.strip() for k in keywords.split('\n') if k.strip()]
-        elif not isinstance(keywords, list):
-            keywords = []
-
-        # Reset status and start new scraping session
-        with global_state.lock:
-            global_state.scraping_status.update({
-                'is_running': True,
-                'progress': 0,
-                'total': 0,
-                'current_status': 'Starting...',
-                'results': [],
-                'errors': []
-            })
-            global_state.data_manager.results = []
-            global_state.data_manager.processed_urls = set()
-
-        # Start scraping thread
-        thread = threading.Thread(
-            target=scraping_worker,
-            args=(country, keywords)
-        )
-        thread.daemon = True
-        thread.start()
-
-        logger.info(f"Scraping started for country: {country} with {len(keywords)} keywords")
-        return jsonify({'message': 'Scraping started successfully'})
-
-    except Exception as e:
-        logger.error(f"Error in start_scraping: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({
-            'error': str(e),
-            'type': e.__class__.__name__
-        }), 500
-
-# Stop Scraping Route
-@app.route('/stop_scraping', methods=['POST'])
-def stop_scraping():
-    try:
-        with global_state.lock:
-            global_state.scraping_status['is_running'] = False
-        return jsonify({'message': 'Scraping stopped'})
-    except Exception as e:
-        logger.error(f"Error stopping scraping: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Status Route
-@app.route('/status')
-def get_status():
-    try:
-        with global_state.lock:
-            return jsonify({
-                **global_state.scraping_status,
-                'metrics': global_state.metrics_collector.metrics if global_state.metrics_collector else {},
-                'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
-                'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {}
-            })
-    except Exception as e:
-        logger.error(f"Error getting status: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Download Results Route
-@app.route('/download/<format>')
-def download_results(format):
-    try:
-        if format not in ['csv', 'json']:
-            return jsonify({'error': 'Invalid format'}), 400
-
-        if not global_state.data_manager or not global_state.data_manager.results:
-            return jsonify({'error': 'No results available'}), 404
-
-        filename = global_state.data_manager.export_results(format)
-        if not filename:
-            return jsonify({'error': 'Export failed'}), 500
-
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    def make_request(self, url: str, method: str = 'get', **kwargs) -> Optional[requests.Response]:
         try:
-            return send_file(
-                filename,
-                as_attachment=True,
-                download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}'
-            )
+            headers = self.get_headers()
+            proxies = global_state.search_engine.get_proxies()
+            kwargs.update({
+                'headers': headers,
+                'timeout': 15,
+                'proxies': proxies,
+                'allow_redirects': True
+            })
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
         except Exception as e:
-            logger.error(f"Error sending file: {str(e)}")
-            return jsonify({'error': 'File delivery failed'}), 500
+            logger.error(f"Request failed for {url}: {e}")
+            raise
 
-    except Exception as e:
-        logger.error(f"Error downloading results: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+# Data Cleaner Class
+class DataCleaner:
+    @staticmethod
+    def remove_duplicates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen_urls = set()
+        cleaned = []
+        for result in results:
+            url = result.get('URL')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                cleaned.append(result)
+        return cleaned
 
-# Metrics Route
-@app.route('/metrics')
-def get_metrics():
-    try:
-        return jsonify({
-            'monitoring': global_state.monitoring_system.get_metrics() if global_state.monitoring_system else {},
-            'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
-            'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {},
-            'data': global_state.metrics_collector.metrics if global_state.metrics_collector else {}
-        })
-    except Exception as e:
-        logger.error(f"Error getting metrics: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Errors Route
-@app.route('/errors')
-def get_errors():
-    try:
-        category = request.args.get('category', 'all')
-        if not global_state.error_tracker:
-            return jsonify({'error': 'Error tracker not initialized'}), 500
-
-        if category == 'all':
-            return jsonify(global_state.error_tracker.errors)
-        return jsonify(global_state.error_tracker.errors.get(category, []))
-    except Exception as e:
-        logger.error(f"Error getting errors: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-def create_app():
-    return app
-
+# Run the app
 if __name__ == '__main__':
     try:
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port, debug=False)
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
     except Exception as e:
-        logger.critical(f"Failed to start application: {str(e)}\n{traceback.format_exc()}")
+        logger.critical(f"Failed to start application: {e}")
         sys.exit(1)
