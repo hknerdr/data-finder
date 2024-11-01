@@ -35,6 +35,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialize Flask app
+app = Flask(__name__)
+
 # Configuration and Keywords
 class Keywords:
     INDUSTRY_KEYWORDS = [
