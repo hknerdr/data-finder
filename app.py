@@ -9,7 +9,7 @@ import re
 import phonenumbers
 import logging
 from urllib.parse import urlparse, quote_plus, parse_qs
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import csv
 import os
@@ -34,8 +34,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
 
 # Configuration and Keywords
 class Keywords:
@@ -73,28 +71,6 @@ class Proxy:
             'https': proxy_url
         }
 
-class GlobalState:
-    def __init__(self):
-        self.scraping_status = {
-            'is_running': False,
-            'progress': 0,
-            'total': 0,
-            'current_status': 'Ready',
-            'results': [],
-            'errors': []
-        }
-        self.proxies: List[Proxy] = []
-        self.data_manager = DataManager()
-        self.lock = threading.Lock()
-        self.search_engine = SearchEngine(self)
-        self.monitoring_system = MonitoringSystem()
-        self.performance_optimizer = PerformanceOptimizer()
-        self.error_tracker = ErrorTracker()
-        self.metrics_collector = MetricsCollector()
-
-global_state = GlobalState()
-
-# Data Management Classes
 class DataManager:
     def __init__(self):
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -142,57 +118,27 @@ class DataManager:
             logger.error(f"Failed to export results: {e}")
             return ""
 
-class SearchEngine:
-    def __init__(self, state: GlobalState):
-        self.state = state
-        self.session = requests.Session()
-        self.user_agent = UserAgent()
+class ScrapingMetrics:
+    def __init__(self, start_time: Optional[datetime] = None):
+        self.start_time = start_time
+        self.end_time: Optional[datetime] = None
+        self.total_requests: int = 0
+        self.failed_requests: int = 0
+        self.successful_extractions: int = 0
+        self.failed_extractions: int = 0
 
-    def search(self, query: str) -> List[str]:
-        try:
-            headers = {
-                'User-Agent': self.user_agent.random,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            }
-            params = {'q': query, 'hl': 'en', 'num': 10}
-            proxies = self.get_proxies()
+    @property
+    def duration(self) -> timedelta:
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return timedelta(0)
 
-            response = self.session.get(
-                'https://www.google.com/search',
-                params=params,
-                headers=headers,
-                proxies=proxies,
-                timeout=15
-            )
+    @property
+    def success_rate(self) -> float:
+        if self.total_requests == 0:
+            return 0
+        return (self.successful_extractions / self.total_requests) * 100
 
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                results = []
-                for a_tag in soup.find_all('a'):
-                    href = a_tag.get('href')
-                    if href and href.startswith('/url?q='):
-                        url = parse_qs(urlparse(href).query).get('q')
-                        if url:
-                            clean_url = url[0].split('&')[0]
-                            if clean_url.startswith('http'):
-                                results.append(clean_url)
-                return results
-            return []
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
-
-    def get_proxies(self) -> Optional[Dict[str, str]]:
-        if not self.state.proxies:
-            return None
-        proxy = random.choice(self.state.proxies)
-        return proxy.to_dict()
-
-# Additional Classes
 class MonitoringSystem:
     def __init__(self):
         self.metrics = ScrapingMetrics()
@@ -238,27 +184,6 @@ class MonitoringSystem:
                 'success_rate': f"{self.metrics.success_rate:.2f}%",
                 'error_count': len(self.error_log)
             }
-
-class ScrapingMetrics:
-    def __init__(self, start_time: Optional[datetime] = None):
-        self.start_time = start_time
-        self.end_time: Optional[datetime] = None
-        self.total_requests: int = 0
-        self.failed_requests: int = 0
-        self.successful_extractions: int = 0
-        self.failed_extractions: int = 0
-
-    @property
-    def duration(self) -> timedelta:
-        if self.start_time and self.end_time:
-            return self.end_time - self.start_time
-        return timedelta(0)
-
-    @property
-    def success_rate(self) -> float:
-        if self.total_requests == 0:
-            return 0
-        return (self.successful_extractions / self.total_requests) * 100
 
 class PerformanceOptimizer:
     def __init__(self):
@@ -381,6 +306,56 @@ class MetricsCollector:
         with self.lock:
             self.metrics.update(new_metrics)
 
+class SearchEngine:
+    def __init__(self, state: 'GlobalState'):
+        self.state = state
+        self.session = requests.Session()
+        self.user_agent = UserAgent()
+
+    def search(self, query: str) -> List[str]:
+        try:
+            headers = {
+                'User-Agent': self.user_agent.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            params = {'q': query, 'hl': 'en', 'num': 10}
+            proxies = self.get_proxies()
+
+            response = self.session.get(
+                'https://www.google.com/search',
+                params=params,
+                headers=headers,
+                proxies=proxies,
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                results = []
+                for a_tag in soup.find_all('a'):
+                    href = a_tag.get('href')
+                    if href and href.startswith('/url?q='):
+                        url = parse_qs(urlparse(href).query).get('q')
+                        if url:
+                            clean_url = url[0].split('&')[0]
+                            if clean_url.startswith('http'):
+                                results.append(clean_url)
+                return results
+            return []
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
+
+    def get_proxies(self) -> Optional[Dict[str, str]]:
+        if not self.state.proxies:
+            return None
+        proxy = random.choice(self.state.proxies)
+        return proxy.to_dict()
+
 # Proxy Validation Function
 def validate_proxy(proxy: Proxy) -> bool:
     try:
@@ -390,132 +365,6 @@ def validate_proxy(proxy: Proxy) -> bool:
     except:
         return False
 
-# Routes
-@app.route('/')
-def home():
-    try:
-        countries = [(country.alpha_2, country.name) for country in pycountry.countries]
-        countries.sort(key=lambda x: x[1])
-        return render_template('index.html', countries=countries,
-                               industry_keywords=Keywords.INDUSTRY_KEYWORDS,
-                               business_keywords=Keywords.BUSINESS_KEYWORDS)
-    except Exception as e:
-        logger.error(f"Error in home route: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/add_proxies', methods=['POST'])
-def add_proxies():
-    try:
-        data = request.json
-        proxies = data.get('proxies', [])
-        new_proxies = []
-        for p in proxies:
-            proxy = Proxy(protocol=p['protocol'],
-                          host=p['host'],
-                          port=int(p['port']),
-                          username=p.get('username', ''),
-                          password=p.get('password', ''))
-            new_proxies.append(proxy)
-        with global_state.lock:
-            global_state.proxies.extend(new_proxies)
-        return jsonify({'message': 'Proxies added successfully'}), 200
-    except Exception as e:
-        logger.error(f"Error adding proxies: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/validate_proxies', methods=['POST'])
-def validate_proxies():
-    try:
-        with global_state.lock:
-            proxies = global_state.proxies.copy()
-        results = []
-        for proxy in proxies:
-            is_valid = validate_proxy(proxy)
-            results.append({
-                'proxy': proxy.get_url(),
-                'valid': is_valid
-            })
-        return jsonify({'validation_results': results}), 200
-    except Exception as e:
-        logger.error(f"Error validating proxies: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/start_scraping', methods=['POST'])
-def start_scraping():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({'error': 'No data received'}), 400
-        country = data.get('country')
-        if not country:
-            return jsonify({'error': 'Missing country'}), 400
-        keywords = data.get('keywords', '')
-        if isinstance(keywords, str):
-            keywords = [k.strip() for k in keywords.split('\n') if k.strip()]
-        elif not isinstance(keywords, list):
-            keywords = []
-
-        with global_state.lock:
-            global_state.scraping_status.update({
-                'is_running': True,
-                'progress': 0,
-                'total': 0,
-                'current_status': 'Starting...',
-                'results': [],
-                'errors': []
-            })
-            global_state.data_manager.results = []
-            global_state.data_manager.processed_urls = set()
-
-        thread = threading.Thread(target=scraping_worker, args=(country, keywords))
-        thread.daemon = True
-        thread.start()
-
-        return jsonify({'message': 'Scraping started successfully'}), 200
-    except Exception as e:
-        logger.error(f"Error in start_scraping: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/stop_scraping', methods=['POST'])
-def stop_scraping():
-    try:
-        with global_state.lock:
-            global_state.scraping_status['is_running'] = False
-        return jsonify({'message': 'Scraping stopped'}), 200
-    except Exception as e:
-        logger.error(f"Error stopping scraping: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/status')
-def get_status():
-    try:
-        with global_state.lock:
-            return jsonify({
-                **global_state.scraping_status,
-                'metrics': global_state.metrics_collector.metrics if global_state.metrics_collector else {},
-                'performance': global_state.performance_optimizer.get_performance_metrics() if global_state.performance_optimizer else {},
-                'errors': global_state.error_tracker.get_error_summary() if global_state.error_tracker else {}
-            })
-    except Exception as e:
-        logger.error(f"Error getting status: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/download/<format>')
-def download_results(format):
-    try:
-        if format not in ['csv', 'json']:
-            return jsonify({'error': 'Invalid format'}), 400
-        if not global_state.data_manager or not global_state.data_manager.results:
-            return jsonify({'error': 'No results available'}), 404
-        filename = global_state.data_manager.export_results(format)
-        if not filename:
-            return jsonify({'error': 'Export failed'}), 500
-        return send_file(filename, as_attachment=True,
-                        download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}')
-    except Exception as e:
-        logger.error(f"Error downloading results: {e}")
-        return jsonify({'error': str(e)}), 500
-
 # Scraping Worker Function
 def scraping_worker(country: str, keywords: List[str] = None):
     try:
@@ -523,6 +372,7 @@ def scraping_worker(country: str, keywords: List[str] = None):
         with global_state.lock:
             global_state.scraping_status['total'] = len(queries)
 
+        global_state.monitoring_system.start_session()
         logger.info(f"Starting scraping for country: {country} with {len(queries)} queries")
 
         request_manager = RequestManager()
@@ -646,7 +496,6 @@ def extract_contacts_from_url(url: str, request_manager: 'RequestManager', count
         logger.error(f"Failed to extract contacts from {url}: {e}")
     return {'Emails': emails, 'Phones': phones}
 
-# Request Manager Class
 class RequestManager:
     def __init__(self):
         self.ua = UserAgent()
@@ -687,7 +536,6 @@ class RequestManager:
             logger.error(f"Request failed for {url}: {e}")
             raise
 
-# Data Cleaner Class
 class DataCleaner:
     @staticmethod
     def remove_duplicates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -700,7 +548,159 @@ class DataCleaner:
                 cleaned.append(result)
         return cleaned
 
-# Run the app
+# Global State Class
+class GlobalState:
+    def __init__(self):
+        self.scraping_status = {
+            'is_running': False,
+            'progress': 0,
+            'total': 0,
+            'current_status': 'Ready',
+            'results': [],
+            'errors': []
+        }
+        self.proxies: List[Proxy] = []
+        self.data_manager = DataManager()
+        self.lock = threading.Lock()
+        self.search_engine = SearchEngine(self)
+        self.monitoring_system = MonitoringSystem()
+        self.performance_optimizer = PerformanceOptimizer()
+        self.error_tracker = ErrorTracker()
+        self.metrics_collector = MetricsCollector()
+
+global_state = GlobalState()
+
+# Flask Routes
+@app.route('/')
+def home():
+    try:
+        countries = [(country.alpha_2, country.name) for country in pycountry.countries]
+        countries.sort(key=lambda x: x[1])
+        return render_template('index.html', countries=countries,
+                               industry_keywords=Keywords.INDUSTRY_KEYWORDS,
+                               business_keywords=Keywords.BUSINESS_KEYWORDS)
+    except Exception as e:
+        logger.error(f"Error in home route: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/add_proxies', methods=['POST'])
+def add_proxies():
+    try:
+        data = request.json
+        proxies = data.get('proxies', [])
+        new_proxies = []
+        for p in proxies:
+            proxy = Proxy(protocol=p['protocol'],
+                          host=p['host'],
+                          port=int(p['port']),
+                          username=p.get('username', ''),
+                          password=p.get('password', ''))
+            new_proxies.append(proxy)
+        with global_state.lock:
+            global_state.proxies.extend(new_proxies)
+        return jsonify({'message': 'Proxies added successfully'}), 200
+    except Exception as e:
+        logger.error(f"Error adding proxies: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/validate_proxies', methods=['POST'])
+def validate_proxies():
+    try:
+        with global_state.lock:
+            proxies = global_state.proxies.copy()
+        results = []
+        for proxy in proxies:
+            is_valid = validate_proxy(proxy)
+            results.append({
+                'proxy': proxy.get_url(),
+                'valid': is_valid
+            })
+        return jsonify({'validation_results': results}), 200
+    except Exception as e:
+        logger.error(f"Error validating proxies: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/start_scraping', methods=['POST'])
+def start_scraping():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data received'}), 400
+        country = data.get('country')
+        if not country:
+            return jsonify({'error': 'Missing country'}), 400
+        keywords = data.get('keywords', '')
+        if isinstance(keywords, str):
+            keywords = [k.strip() for k in keywords.split('\n') if k.strip()]
+        elif not isinstance(keywords, list):
+            keywords = []
+
+        with global_state.lock:
+            global_state.scraping_status.update({
+                'is_running': True,
+                'progress': 0,
+                'total': 0,
+                'current_status': 'Starting...',
+                'results': [],
+                'errors': []
+            })
+            global_state.data_manager.results = []
+            global_state.data_manager.processed_urls = set()
+
+        thread = threading.Thread(target=scraping_worker, args=(country, keywords))
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({'message': 'Scraping started successfully'}), 200
+    except Exception as e:
+        logger.error(f"Error in start_scraping: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/stop_scraping', methods=['POST'])
+def stop_scraping():
+    try:
+        with global_state.lock:
+            global_state.scraping_status['is_running'] = False
+        return jsonify({'message': 'Scraping stopped'}), 200
+    except Exception as e:
+        logger.error(f"Error stopping scraping: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/status')
+def get_status():
+    try:
+        with global_state.lock:
+            return jsonify({
+                **global_state.scraping_status,
+                'metrics': global_state.monitoring_system.get_metrics(),
+                'performance': global_state.performance_optimizer.get_performance_metrics(),
+                'errors': global_state.error_tracker.get_error_summary()
+            })
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/<format>')
+def download_results(format):
+    try:
+        if format not in ['csv', 'json']:
+            return jsonify({'error': 'Invalid format'}), 400
+        if not global_state.data_manager or not global_state.data_manager.results:
+            return jsonify({'error': 'No results available'}), 404
+        filename = global_state.data_manager.export_results(format)
+        if not filename:
+            return jsonify({'error': 'Export failed'}), 500
+        return send_file(filename, as_attachment=True,
+                        download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}')
+    except Exception as e:
+        logger.error(f"Error downloading results: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Run the app using create_app
+def create_app():
+    return app
+
+# Run the app if executed directly
 if __name__ == '__main__':
     try:
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
