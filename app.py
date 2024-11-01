@@ -27,7 +27,7 @@ import pycountry
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
     format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -151,16 +151,19 @@ class MonitoringSystem:
     def start_session(self):
         with self.lock:
             self.metrics = ScrapingMetrics(start_time=datetime.now())
+            logger.debug("Monitoring session started.")
 
     def end_session(self):
         with self.lock:
             self.metrics.end_time = datetime.now()
+            logger.debug("Monitoring session ended.")
 
     def record_request(self, success: bool):
         with self.lock:
             self.metrics.total_requests += 1
             if not success:
                 self.metrics.failed_requests += 1
+            logger.debug(f"Recorded request: success={success}")
 
     def record_extraction(self, success: bool):
         with self.lock:
@@ -168,6 +171,7 @@ class MonitoringSystem:
                 self.metrics.successful_extractions += 1
             else:
                 self.metrics.failed_extractions += 1
+            logger.debug(f"Recorded extraction: success={success}")
 
     def log_error(self, error: str, context: str = None):
         with self.lock:
@@ -176,6 +180,7 @@ class MonitoringSystem:
                 'error': str(error),
                 'context': context
             })
+            logger.error(f"Logged error: {error} | Context: {context}")
 
     def get_metrics(self) -> Dict[str, Any]:
         with self.lock:
@@ -198,10 +203,12 @@ class PerformanceOptimizer:
     def record_request_time(self, duration: float):
         with self.lock:
             self.request_times.append(duration)
+            logger.debug(f"Recorded request time: {duration} seconds")
 
     def record_extraction_time(self, duration: float):
         with self.lock:
             self.extraction_times.append(duration)
+            logger.debug(f"Recorded extraction time: {duration} seconds")
 
     def get_performance_metrics(self) -> Dict[str, Any]:
         with self.lock:
@@ -246,6 +253,7 @@ class ErrorTracker:
                 'context': context,
                 'traceback': ''.join(traceback.format_exception(None, error, error.__traceback__))
             })
+        logger.error(f"Recorded error of type '{error_type}': {error}")
 
     def get_error_summary(self) -> Dict[str, Any]:
         with self.lock:
@@ -308,6 +316,7 @@ class MetricsCollector:
     def update_metrics(self, new_metrics: Dict[str, Any]):
         with self.lock:
             self.metrics.update(new_metrics)
+            logger.debug(f"Updated metrics: {new_metrics}")
 
 class SearchEngine:
     def __init__(self, state: 'GlobalState'):
@@ -328,6 +337,8 @@ class SearchEngine:
             params = {'q': query, 'hl': 'en', 'num': 10}
             proxies = self.get_proxies()
 
+            logger.debug(f"Searching Google with query: '{query}' using proxies: {proxies}")
+
             response = self.session.get(
                 'https://www.google.com/search',
                 params=params,
@@ -335,6 +346,8 @@ class SearchEngine:
                 proxies=proxies,
                 timeout=15
             )
+
+            logger.debug(f"Google response status code: {response.status_code}")
 
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -347,36 +360,47 @@ class SearchEngine:
                             clean_url = url[0].split('&')[0]
                             if clean_url.startswith('http'):
                                 results.append(clean_url)
+                logger.debug(f"Found {len(results)} URLs for query: '{query}'")
                 return results
+            else:
+                logger.warning(f"Non-200 status code received: {response.status_code}")
             return []
         except Exception as e:
-            logger.error(f"Search failed: {e}")
+            logger.error(f"Search failed for query '{query}': {e}")
+            self.state.monitoring_system.log_error(e, context=f"Search query: {query}")
             return []
 
     def get_proxies(self) -> Optional[Dict[str, str]]:
         if not self.state.proxies:
+            logger.debug("No proxies available.")
             return None
         proxy = random.choice(self.state.proxies)
+        logger.debug(f"Using proxy: {proxy.get_url()}")
         return proxy.to_dict()
 
 # Proxy Validation Function
 def validate_proxy(proxy: Proxy) -> bool:
     try:
         proxies = proxy.to_dict()
+        logger.debug(f"Validating proxy: {proxy.get_url()}")
         response = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=10)
-        return response.status_code == 200
-    except:
+        is_valid = response.status_code == 200
+        logger.debug(f"Proxy {proxy.get_url()} validation result: {is_valid}")
+        return is_valid
+    except Exception as e:
+        logger.error(f"Proxy validation failed for {proxy.get_url()}: {e}")
         return False
 
 # Scraping Worker Function
 def scraping_worker(country: str, keywords: List[str] = None):
     try:
         queries = generate_search_queries(country, keywords)
+        total_queries = len(queries)
         with global_state.lock:
-            global_state.scraping_status['total'] = len(queries)
+            global_state.scraping_status['total'] = total_queries
 
         global_state.monitoring_system.start_session()
-        logger.info(f"Starting scraping for country: {country} with {len(queries)} queries")
+        logger.info(f"Starting scraping for country: {country} with {total_queries} queries")
 
         request_manager = RequestManager()
 
@@ -387,7 +411,7 @@ def scraping_worker(country: str, keywords: List[str] = None):
                     break
 
             try:
-                status_message = f"Processing query {idx}/{len(queries)}: {query}"
+                status_message = f"Processing query {idx}/{total_queries}: {query}"
                 logger.info(status_message)
                 with global_state.lock:
                     global_state.scraping_status['current_status'] = status_message
@@ -396,7 +420,7 @@ def scraping_worker(country: str, keywords: List[str] = None):
                 results = global_state.search_engine.search(query)
 
                 if not results:
-                    logger.warning(f"No results found for query: {query}")
+                    logger.warning(f"No results found for query: '{query}'")
 
                 for url in results:
                     with global_state.lock:
@@ -421,19 +445,21 @@ def scraping_worker(country: str, keywords: List[str] = None):
                                 'Phones': []
                             })
 
-                time.sleep(random.uniform(2.0, 4.0))
+                # Optional: Save interim results periodically
+                if idx % 50 == 0:
+                    with global_state.lock:
+                        global_state.data_manager.results = global_state.scraping_status['results']
+                    global_state.data_manager.save_interim()
+
+                time.sleep(random.uniform(2.0, 4.0))  # Rate limiting
 
             except Exception as e:
-                logger.error(f"Error processing query: {e}")
+                logger.error(f"Error processing query '{query}': {e}")
                 with global_state.lock:
                     global_state.scraping_status['errors'].append(str(e))
+                global_state.monitoring_system.log_error(e, context=f"Query: {query}")
                 time.sleep(random.uniform(5.0, 10.0))
                 continue
-
-            if idx % 50 == 0:
-                with global_state.lock:
-                    global_state.data_manager.results = global_state.scraping_status['results']
-                global_state.data_manager.save_interim()
 
         with global_state.lock:
             cleaned_results = DataCleaner.remove_duplicates(global_state.scraping_status['results'])
@@ -446,12 +472,13 @@ def scraping_worker(country: str, keywords: List[str] = None):
             global_state.scraping_status.update({
                 'is_running': False,
                 'current_status': "Completed",
-                'progress': len(queries)
+                'progress': total_queries
             })
-        logger.info("Scraping process completed")
+        logger.info("Scraping process completed successfully.")
 
     except Exception as e:
         logger.error(f"Scraping worker failed: {e}")
+        global_state.monitoring_system.log_error(e, context="Scraping Worker")
         with global_state.lock:
             global_state.scraping_status.update({
                 'current_status': f"Failed: {e}",
@@ -463,6 +490,7 @@ def generate_search_queries(country: str, keywords: List[str] = None) -> List[st
     if not keywords:
         keywords = [f"{industry} {business}" for industry in Keywords.INDUSTRY_KEYWORDS for business in Keywords.BUSINESS_KEYWORDS]
     queries = [f"{keyword} {country}" for keyword in keywords]
+    logger.debug(f"Generated {len(queries)} search queries.")
     return queries
 
 EMAIL_REGEX = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -495,8 +523,10 @@ def extract_contacts_from_url(url: str, request_manager: 'RequestManager', count
             phones = [phone.strip() for phone in phones if DataValidator.validate_phone(phone, country_code)]
             emails = list(set(emails))
             phones = list(set(phones))
+            logger.debug(f"Extracted {len(emails)} emails and {len(phones)} phones from {url}")
     except Exception as e:
         logger.error(f"Failed to extract contacts from {url}: {e}")
+        global_state.monitoring_system.log_error(e, context=f"URL: {url}")
     return {'Emails': emails, 'Phones': phones}
 
 class RequestManager:
@@ -509,6 +539,7 @@ class RequestManager:
         self.request_count += 1
         if self.request_count % 5 == 0:
             self.ua = UserAgent()
+            logger.debug("Rotated User-Agent.")
         return {
             'User-Agent': self.ua.random,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -532,11 +563,17 @@ class RequestManager:
                 'proxies': proxies,
                 'allow_redirects': True
             })
+            logger.debug(f"Making request to {url} with headers {headers} and proxies {proxies}")
+            start_time = time.time()
             response = self.session.request(method, url, **kwargs)
+            duration = time.time() - start_time
+            global_state.performance_optimizer.record_request_time(duration)
             response.raise_for_status()
+            logger.debug(f"Received response from {url} in {duration:.2f} seconds.")
             return response
         except Exception as e:
             logger.error(f"Request failed for {url}: {e}")
+            global_state.monitoring_system.log_error(e, context=f"URL: {url}")
             raise
 
 class DataCleaner:
@@ -549,6 +586,7 @@ class DataCleaner:
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 cleaned.append(result)
+        logger.debug(f"Removed duplicates. Cleaned results count: {len(cleaned)}")
         return cleaned
 
 # Global State Class
@@ -599,6 +637,7 @@ def add_proxies():
                           username=p.get('username', ''),
                           password=p.get('password', ''))
             new_proxies.append(proxy)
+            logger.debug(f"Added proxy: {proxy.get_url()}")
         with global_state.lock:
             global_state.proxies.extend(new_proxies)
         return jsonify({'message': 'Proxies added successfully'}), 200
@@ -618,6 +657,7 @@ def validate_proxies():
                 'proxy': proxy.get_url(),
                 'valid': is_valid
             })
+            logger.debug(f"Proxy {proxy.get_url()} validation: {is_valid}")
         return jsonify({'validation_results': results}), 200
     except Exception as e:
         logger.error(f"Error validating proxies: {e}")
@@ -639,6 +679,8 @@ def start_scraping():
             keywords = []
 
         with global_state.lock:
+            if global_state.scraping_status['is_running']:
+                return jsonify({'error': 'Scraping is already running'}), 400
             global_state.scraping_status.update({
                 'is_running': True,
                 'progress': 0,
@@ -649,6 +691,7 @@ def start_scraping():
             })
             global_state.data_manager.results = []
             global_state.data_manager.processed_urls = set()
+            logger.info(f"Scraping started with country: {country} and keywords: {keywords}")
 
         thread = threading.Thread(target=scraping_worker, args=(country, keywords))
         thread.daemon = True
@@ -663,7 +706,10 @@ def start_scraping():
 def stop_scraping():
     try:
         with global_state.lock:
+            if not global_state.scraping_status['is_running']:
+                return jsonify({'message': 'Scraping is not running'}), 200
             global_state.scraping_status['is_running'] = False
+            logger.info("Scraping has been requested to stop.")
         return jsonify({'message': 'Scraping stopped'}), 200
     except Exception as e:
         logger.error(f"Error stopping scraping: {e}")
@@ -673,12 +719,18 @@ def stop_scraping():
 def get_status():
     try:
         with global_state.lock:
-            return jsonify({
-                **global_state.scraping_status,
-                'metrics': global_state.monitoring_system.get_metrics(),
-                'performance': global_state.performance_optimizer.get_performance_metrics(),
-                'errors': global_state.error_tracker.get_error_summary()
-            })
+            status_copy = global_state.scraping_status.copy()
+        metrics = global_state.monitoring_system.get_metrics()
+        performance = global_state.performance_optimizer.get_performance_metrics()
+        errors = global_state.error_tracker.get_error_summary()
+        response = {
+            **status_copy,
+            'metrics': metrics,
+            'performance': performance,
+            'errors': errors
+        }
+        logger.debug(f"Status requested: {response}")
+        return jsonify(response)
     except Exception as e:
         logger.error(f"Error getting status: {e}")
         return jsonify({'error': str(e)}), 500
@@ -693,6 +745,7 @@ def download_results(format):
         filename = global_state.data_manager.export_results(format)
         if not filename:
             return jsonify({'error': 'Export failed'}), 500
+        logger.info(f"Providing download for {filename}")
         return send_file(filename, as_attachment=True,
                         download_name=f'scraping_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{format}')
     except Exception as e:
