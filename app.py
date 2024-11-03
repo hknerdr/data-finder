@@ -416,10 +416,13 @@ class SearchEngine:
         self.session = requests.Session()
         self.user_agent = UserAgent()
         self.search_delay = random.uniform(10, 15)
-        
+
     def search(self, query: str) -> List[str]:
+        logger.info(f"Starting search for query: {query}")
         try:
-            logger.info(f"Starting search for query: {query}")
+            # Add delay to prevent rate limiting
+            time.sleep(self.search_delay)
+            
             headers = {
                 'User-Agent': self.user_agent.random,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -450,41 +453,40 @@ class SearchEngine:
                 verify=False
             )
             
-            if response.status_code == 200:
-                logger.info(f"Successful response received for query: {query}")
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                results = []
-                
-                selectors = [
-                    'div.g div.yuRUbf > a[href]',
-                    'div.rc > div.r > a[href]',
-                    'div.g a[href]'
-                ]
-                
-                for selector in selectors:
-                    links = soup.select(selector)
-                    if links:
-                        logger.debug(f"Found {len(links)} links using selector: {selector}")
-                        for link in links:
-                            url = link.get('href')
-                            if url and url.startswith('http') and 'google.' not in url:
-                                results.append(url)
-                                logger.debug(f"Added URL to results: {url}")
-                
-                if not results:
-                    logger.debug("No results found with primary selectors, trying fallback method")
-                    urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s<>"\']*', response.text)
-                    results = [url for url in urls if 'google.' not in url]
-                
-                unique_results = list(set(results))
-                logger.info(f"Found {len(unique_results)} unique URLs for query: {query}")
-                return unique_results
-                
-            else:
+            if response.status_code != 200:
                 logger.error(f"Search failed with status code: {response.status_code}")
                 return []
-                
+            
+            logger.info(f"Successful response received for query: {query}")
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            results = []
+            
+            selectors = [
+                'div.g div.yuRUbf > a[href]',
+                'div.rc > div.r > a[href]',
+                'div.g a[href]'
+            ]
+            
+            for selector in selectors:
+                links = soup.select(selector)
+                if links:
+                    logger.debug(f"Found {len(links)} links using selector: {selector}")
+                    for link in links:
+                        url = link.get('href')
+                        if url and url.startswith('http') and 'google.' not in url:
+                            results.append(url)
+                            logger.debug(f"Added URL to results: {url}")
+            
+            if not results:
+                logger.debug("No results found with primary selectors, trying fallback method")
+                urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s<>"\']*', response.text)
+                results = [url for url in urls if 'google.' not in url]
+            
+            unique_results = list(set(results))
+            logger.info(f"Found {len(unique_results)} unique URLs for query: {query}")
+            return unique_results
+            
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed for query '{query}': {str(e)}")
             self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
@@ -493,6 +495,13 @@ class SearchEngine:
             logger.error(f"Unexpected error in search for query '{query}': {str(e)}")
             self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
             return []
+
+    def get_proxies(self) -> Optional[Dict[str, str]]:
+        if not self.state.proxies:
+            return None
+        proxy = random.choice(self.state.proxies)
+        logger.debug(f"Using proxy: {proxy.get_url()}")
+        return proxy.to_dict()
             
             # Fallback method if no results found
             if not results:
