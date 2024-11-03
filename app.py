@@ -415,66 +415,84 @@ class SearchEngine:
         self.state = state
         self.session = requests.Session()
         self.user_agent = UserAgent()
-        self.search_delay = random.uniform(10, 15)  # Increased delay between searches
+        self.search_delay = random.uniform(10, 15)
         
     def search(self, query: str) -> List[str]:
-    try:
-        logger.info(f"Starting search for query: {query}")
-        headers = {
-            'User-Agent': self.user_agent.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        
-        # Use a single search domain initially for testing
-        search_url = 'https://www.google.com/search'
-        
-        params = {
-            'q': query,
-            'hl': 'en',
-            'num': 10,  # Reduced number for testing
-            'start': 0
-        }
-        
-        logger.debug(f"Making request to {search_url} with params: {params}")
-        
-        # Add timeout to prevent hanging
-        response = self.session.get(
-            search_url,
-            params=params,
-            headers=headers,
-            proxies=self.get_proxies(),
-            timeout=30,
-            verify=False
-        )
-        
-        if response.status_code == 200:
-            logger.info(f"Successful response received for query: {query}")
-            soup = BeautifulSoup(response.text, 'html.parser')
+        try:
+            logger.info(f"Starting search for query: {query}")
+            headers = {
+                'User-Agent': self.user_agent.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
             
-            # Store the results
-            results = []
+            search_url = 'https://www.google.com/search'
             
-            # Try multiple selector patterns
-            selectors = [
-                'div.g div.yuRUbf > a[href]',
-                'div.rc > div.r > a[href]',
-                'div.g a[href]'
-            ]
+            params = {
+                'q': query,
+                'hl': 'en',
+                'num': 10,
+                'start': 0
+            }
             
-            for selector in selectors:
-                links = soup.select(selector)
-                if links:
-                    logger.debug(f"Found {len(links)} links using selector: {selector}")
-                    for link in links:
-                        url = link.get('href')
-                        if url and url.startswith('http') and 'google.' not in url:
-                            results.append(url)
-                            logger.debug(f"Added URL to results: {url}")
+            logger.debug(f"Making request to {search_url} with params: {params}")
+            
+            response = self.session.get(
+                search_url,
+                params=params,
+                headers=headers,
+                proxies=self.get_proxies(),
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Successful response received for query: {query}")
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                results = []
+                
+                selectors = [
+                    'div.g div.yuRUbf > a[href]',
+                    'div.rc > div.r > a[href]',
+                    'div.g a[href]'
+                ]
+                
+                for selector in selectors:
+                    links = soup.select(selector)
+                    if links:
+                        logger.debug(f"Found {len(links)} links using selector: {selector}")
+                        for link in links:
+                            url = link.get('href')
+                            if url and url.startswith('http') and 'google.' not in url:
+                                results.append(url)
+                                logger.debug(f"Added URL to results: {url}")
+                
+                if not results:
+                    logger.debug("No results found with primary selectors, trying fallback method")
+                    urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s<>"\']*', response.text)
+                    results = [url for url in urls if 'google.' not in url]
+                
+                unique_results = list(set(results))
+                logger.info(f"Found {len(unique_results)} unique URLs for query: {query}")
+                return unique_results
+                
+            else:
+                logger.error(f"Search failed with status code: {response.status_code}")
+                return []
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed for query '{query}': {str(e)}")
+            self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error in search for query '{query}': {str(e)}")
+            self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
+            return []
             
             # Fallback method if no results found
             if not results:
