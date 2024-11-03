@@ -418,93 +418,86 @@ class SearchEngine:
         self.search_delay = random.uniform(10, 15)  # Increased delay between searches
         
     def search(self, query: str) -> List[str]:
-        try:
-            headers = {
-                'User-Agent': self.user_agent.random,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0'
-            }
+    try:
+        logger.info(f"Starting search for query: {query}")
+        headers = {
+            'User-Agent': self.user_agent.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+        
+        # Use a single search domain initially for testing
+        search_url = 'https://www.google.com/search'
+        
+        params = {
+            'q': query,
+            'hl': 'en',
+            'num': 10,  # Reduced number for testing
+            'start': 0
+        }
+        
+        logger.debug(f"Making request to {search_url} with params: {params}")
+        
+        # Add timeout to prevent hanging
+        response = self.session.get(
+            search_url,
+            params=params,
+            headers=headers,
+            proxies=self.get_proxies(),
+            timeout=30,
+            verify=False
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Successful response received for query: {query}")
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Rotate between different search domains
-            search_domains = [
-                'https://www.google.com/search',
-                'https://www.google.co.uk/search',
-                'https://www.google.fr/search',
-                'https://www.google.de/search'
+            # Store the results
+            results = []
+            
+            # Try multiple selector patterns
+            selectors = [
+                'div.g div.yuRUbf > a[href]',
+                'div.rc > div.r > a[href]',
+                'div.g a[href]'
             ]
-            search_url = random.choice(search_domains)
             
-            params = {
-                'q': query,
-                'hl': 'en',
-                'num': 20,
-                'start': 0,
-                'filter': 0,
-                'ie': 'utf-8',
-                'oe': 'utf-8'
-            }
+            for selector in selectors:
+                links = soup.select(selector)
+                if links:
+                    logger.debug(f"Found {len(links)} links using selector: {selector}")
+                    for link in links:
+                        url = link.get('href')
+                        if url and url.startswith('http') and 'google.' not in url:
+                            results.append(url)
+                            logger.debug(f"Added URL to results: {url}")
             
-            proxies = self.get_proxies()
+            # Fallback method if no results found
+            if not results:
+                logger.debug("No results found with primary selectors, trying fallback method")
+                urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s<>"\']*', response.text)
+                results = [url for url in urls if 'google.' not in url]
             
-            logger.debug(f"Searching with query: '{query}' using domain: {search_url}")
+            unique_results = list(set(results))
+            logger.info(f"Found {len(unique_results)} unique URLs for query: {query}")
+            return unique_results
             
-            # Add random delay before each request
-            time.sleep(self.search_delay)
-            
-            response = self.session.get(
-                search_url,
-                params=params,
-                headers=headers,
-                proxies=proxies,
-                timeout=30,
-                allow_redirects=True
-            )
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Multiple selectors for different Google layouts
-                selectors = [
-                    'div.g div.yuRUbf > a[href]',  # Modern layout
-                    'div.rc > div.r > a[href]',     # Classic layout
-                    'div.g > div > div.rc > div.r > a[href]',  # Alternative layout
-                    'div.g a[href]'                 # Generic fallback
-                ]
-                
-                results = []
-                for selector in selectors:
-                    links = soup.select(selector)
-                    if links:
-                        for link in links:
-                            url = link.get('href')
-                            if url.startswith('http') and 'google.' not in url:
-                                results.append(url)
-                        break  # Stop if we found results with current selector
-                
-                if not results:
-                    # Fallback: try to find any valid URLs in the page
-                    urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s<>"\']*', response.text)
-                    results = [url for url in urls if 'google.' not in url]
-                
-                logger.debug(f"Found {len(results)} URLs for query: '{query}'")
-                return list(set(results))  # Remove duplicates
-            else:
-                logger.warning(f"Search failed with status code: {response.status_code}")
-                return []
-                
-        except Exception as e:
-            logger.error(f"Search failed for query '{query}': {e}")
-            self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
+        else:
+            logger.error(f"Search failed with status code: {response.status_code}")
             return []
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request failed for query '{query}': {str(e)}")
+        self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
+        return []
+    except Exception as e:
+        logger.error(f"Unexpected error in search for query '{query}': {str(e)}")
+        self.state.monitoring_system.log_error(str(e), context=f"Search query: {query}")
+        return []
 
     def get_proxies(self) -> Optional[Dict[str, str]]:
         if not self.state.proxies:
@@ -528,6 +521,9 @@ def validate_proxy(proxy: Proxy) -> bool:
 
 # Update the scraping worker function to handle rate limiting
 def scraping_worker(country: str, keywords: List[str] = None):
+    max_retries = 3
+    retry_count = 0
+    
     try:
         queries = generate_search_queries(country, keywords)
         total_queries = len(queries)
@@ -545,52 +541,40 @@ def scraping_worker(country: str, keywords: List[str] = None):
                 if not global_state.scraping_status['is_running']:
                     break
             
-            try:
-                # Add longer delays between queries
-                time.sleep(random.uniform(15, 30))
-                
-                status_message = f"Processing query {idx}/{total_queries}: {query}"
-                logger.info(status_message)
-                
-                with global_state.lock:
-                    global_state.scraping_status['current_status'] = status_message
-                    global_state.scraping_status['progress'] = idx
-                
-                results = global_state.search_engine.search(query)
-                
-                if results:
-                    for url in results:
-                        with global_state.lock:
-                            if url in global_state.data_manager.processed_urls:
-                                continue
-                            global_state.data_manager.processed_urls.add(url)
-                        
-                        # Add delay between processing each URL
-                        time.sleep(random.uniform(5, 10))
-                        
-                        contacts = extract_contacts_from_url(url, request_manager, country_code=country)
-                        if contacts['emails'] or contacts['phones']:
-                            with global_state.lock:
-                                global_state.scraping_status['results'].append({
-                                    'URL': url,
-                                    'Emails': contacts['emails'],
-                                    'Phones': contacts['phones']
-                                })
-                            global_state.monitoring_system.record_extraction(True)
-                
-                # Save interim results more frequently
-                if idx % 10 == 0:
+            while retry_count < max_retries:
+                try:
+                    time.sleep(random.uniform(15, 30))
+                    
+                    status_message = f"Processing query {idx}/{total_queries}: {query} (Attempt {retry_count + 1})"
+                    logger.info(status_message)
+                    
                     with global_state.lock:
-                        global_state.data_manager.results = global_state.scraping_status['results']
-                    global_state.data_manager.save_interim()
-                
-            except Exception as e:
-                logger.error(f"Error processing query '{query}': {e}")
-                with global_state.lock:
-                    global_state.scraping_status['errors'].append(str(e))
-                global_state.monitoring_system.log_error(str(e), context=f"Query: {query}")
-                time.sleep(random.uniform(30, 60))  # Longer delay after errors
-                continue
+                        global_state.scraping_status['current_status'] = status_message
+                        global_state.scraping_status['progress'] = idx
+                    
+                    results = global_state.search_engine.search(query)
+                    
+                    if results:
+                        logger.info(f"Found {len(results)} results for query: {query}")
+                        break
+                    else:
+                        retry_count += 1
+                        logger.warning(f"No results found for query: {query}, attempt {retry_count}")
+                        time.sleep(random.uniform(30, 60))
+                        
+                except Exception as e:
+                    retry_count += 1
+                    logger.error(f"Error processing query '{query}': {e}")
+                    with global_state.lock:
+                        global_state.scraping_status['errors'].append(str(e))
+                    global_state.monitoring_system.log_error(str(e), context=f"Query: {query}")
+                    time.sleep(random.uniform(30, 60))
+            
+            retry_count = 0  # Reset for next query
+            
+            # Process results if any were found
+            if results:
+                process_results(results, request_manager, country)
                 
     except Exception as e:
         logger.error(f"Critical error in scraping worker: {e}")
@@ -601,6 +585,31 @@ def scraping_worker(country: str, keywords: List[str] = None):
     finally:
         global_state.monitoring_system.end_session()
         logger.info("Scraping worker finished execution")
+
+def process_results(results: List[str], request_manager: RequestManager, country: str):
+    """Process the found URLs and extract contact information."""
+    for url in results:
+        with global_state.lock:
+            if url in global_state.data_manager.processed_urls:
+                continue
+            global_state.data_manager.processed_urls.add(url)
+        
+        try:
+            time.sleep(random.uniform(5, 10))
+            contacts = extract_contacts_from_url(url, request_manager, country_code=country)
+            
+            if contacts['emails'] or contacts['phones']:
+                with global_state.lock:
+                    global_state.scraping_status['results'].append({
+                        'URL': url,
+                        'Emails': contacts['emails'],
+                        'Phones': contacts['phones']
+                    })
+                global_state.monitoring_system.record_extraction(True)
+                logger.info(f"Successfully extracted contacts from {url}")
+        except Exception as e:
+            logger.error(f"Failed to process URL {url}: {e}")
+            global_state.monitoring_system.record_extraction(False)
 
 # Utility Functions
 def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
