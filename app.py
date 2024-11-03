@@ -12,6 +12,7 @@ import threading
 import requests
 import phonenumbers
 import pycountry
+import statistics
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
@@ -590,6 +591,16 @@ def scraping_worker(country: str, keywords: List[str] = None):
                 global_state.monitoring_system.log_error(str(e), context=f"Query: {query}")
                 time.sleep(random.uniform(30, 60))  # Longer delay after errors
                 continue
+                
+    except Exception as e:
+        logger.error(f"Critical error in scraping worker: {e}")
+        with global_state.lock:
+            global_state.scraping_status['is_running'] = False
+            global_state.scraping_status['errors'].append(str(e))
+        global_state.monitoring_system.log_error(str(e), context="Scraping worker critical error")
+    finally:
+        global_state.monitoring_system.end_session()
+        logger.info("Scraping worker finished execution")
 
 # Utility Functions
 def generate_search_queries(country: str, keywords: List[str] = None) -> List[str]:
