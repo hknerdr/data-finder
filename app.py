@@ -1,35 +1,34 @@
 # File: app.py
 
-from flask import Flask, render_template, request, jsonify, send_file
-import requests
-from bs4 import BeautifulSoup
-import threading
-import time
-import re
-import phonenumbers
-import logging
-from urllib.parse import urlparse, parse_qs
-from datetime import datetime, timedelta
+import os
+import sys
 import json
 import csv
-import os
-from fake_useragent import UserAgent
-from tenacity import retry, stop_after_attempt, wait_exponential
+import re
+import time
 import random
-from pathlib import Path
+import logging
+import threading
+import requests
+import phonenumbers
+import pycountry
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-import statistics
-import traceback
-import sys
-import pycountry
+from flask import Flask, render_template, request, jsonify, send_file
+from fake_useragent import UserAgent
+from tenacity import retry, stop_after_attempt, wait_exponential
+from urllib.parse import urlparse, parse_qs
+from pathlib import Path
 
-# Configure logging
+# Enhanced logging configuration
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
+    level=logging.DEBUG,
     format='%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('scraper.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -40,18 +39,112 @@ app = Flask(__name__)
 # Configuration and Keywords
 class Keywords:
     INDUSTRY_KEYWORDS = [
-        'Non-Alcoholic Beverages', 'Soft Drinks', 'Beverages', 'Juices', 'Mineral Water',
-        'Bottled Water', 'Energy Drinks', 'Sports Drinks', 'Carbonated Drinks',
-        'Flavored Water', 'Herbal Drinks', 'Functional Beverages', 'Dairy Beverages',
-        'Plant-Based Beverages', 'Smoothies', 'Iced Tea', 'Ready-to-Drink Coffee',
-        'Mocktails', 'Kombucha', 'Vitamin Water'
+        'Beverage Distributor', 'Drink Wholesaler', 'Beverage Supplier',
+        'Soft Drinks Distribution', 'Beverage Trading Company',
+        'Non-Alcoholic Drinks Supplier', 'Beverage Import Export',
+        'Drink Distribution Company', 'Beverage Supply Chain',
+        'Wholesale Drinks Supplier'
+    ]
+    
+    BUSINESS_KEYWORDS = [
+        'Contact Us', 'About Us', 'Get in Touch', 'Business Inquiry',
+        'Wholesale Inquiry', 'Distribution Partner', 'Business Contact',
+        'Sales Department', 'Business Development'
     ]
 
-    BUSINESS_KEYWORDS = [
-        'Distributor', 'Wholesaler', 'Supplier', 'Trader', 'Dealer', 'Reseller',
-        'Stockist', 'Merchant', 'Importer', 'Exporter', 'Agency', 'Broker',
-        'Trading Company', 'Bulk Supplier', 'B2B Supplier'
-    ]
+class ContactExtractor:
+    EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    PHONE_REGEX = r'(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+    
+    @staticmethod
+    def extract_emails(text: str) -> List[str]:
+        emails = re.findall(ContactExtractor.EMAIL_REGEX, text)
+        return list(set([email.lower() for email in emails if '@' in email]))
+    
+    @staticmethod
+    def extract_phones(text: str, country_code: str) -> List[str]:
+        phones = []
+        matches = re.findall(ContactExtractor.PHONE_REGEX, text)
+        for match in matches:
+            try:
+                number = phonenumbers.parse(match, country_code)
+                if phonenumbers.is_valid_number(number):
+                    formatted = phonenumbers.format_number(
+                        number, 
+                        phonenumbers.PhoneNumberFormat.INTERNATIONAL
+                    )
+                    phones.append(formatted)
+            except Exception:
+                continue
+        return list(set(phones))
+
+class WebScraper:
+    def __init__(self, proxy_manager):
+        self.session = requests.Session()
+        self.ua = UserAgent()
+        self.proxy_manager = proxy_manager
+        
+    def get_headers(self) -> Dict[str, str]:
+        return {
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+    
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def scrape_url(self, url: str, country_code: str) -> Dict[str, List[str]]:
+        try:
+            headers = self.get_headers()
+            proxy = self.proxy_manager.get_proxy()
+            response = self.session.get(
+                url,
+                headers=headers,
+                proxies=proxy.to_dict() if proxy else None,
+                timeout=15,
+                verify=False
+            )
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            text_content = soup.get_text()
+            
+            emails = ContactExtractor.extract_emails(text_content)
+            phones = ContactExtractor.extract_phones(text_content, country_code)
+            
+            # Also check for contact page links
+            contact_links = soup.find_all('a', href=re.compile(r'contact|about|get-in-touch', re.I))
+            for link in contact_links:
+                href = link.get('href')
+                if href:
+                    if not href.startswith(('http://', 'https://')):
+                        href = f"{urlparse(url).scheme}://{urlparse(url).netloc}{href}"
+                    try:
+                        contact_response = self.session.get(
+                            href,
+                            headers=headers,
+                            proxies=proxy.to_dict() if proxy else None,
+                            timeout=10
+                        )
+                        if contact_response.status_code == 200:
+                            contact_soup = BeautifulSoup(contact_response.text, 'html.parser')
+                            contact_text = contact_soup.get_text()
+                            emails.extend(ContactExtractor.extract_emails(contact_text))
+                            phones.extend(ContactExtractor.extract_phones(contact_text, country_code))
+                    except Exception as e:
+                        logger.warning(f"Failed to scrape contact page {href}: {e}")
+            
+            return {
+                'emails': list(set(emails)),
+                'phones': list(set(phones))
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to scrape {url}: {e}")
+            return {'emails': [], 'phones': []}
 
 @dataclass
 class Proxy:

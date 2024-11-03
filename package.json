@@ -1,0 +1,13 @@
+{
+  "name": "web-scraper",
+  "private": true,
+  "scripts": {
+    "start": "python app.py",
+    "test": "python -m pytest test_proxies.py"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "puppeteer": "^21.5.2"
+  }
+}
